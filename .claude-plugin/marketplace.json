@@ -31,7 +31,7 @@
     {
       "name": "kaiten",
       "description": "Kaiten board automation tools — cards, columns, properties, comments",
-      "version": "1.2.1",
+      "version": "1.4.0",
       "author": {
         "name": "AI Hub Contributors"
       },
