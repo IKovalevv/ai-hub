@@ -128,6 +128,7 @@ APPLY
 #   STUB_FAIL_SECOND_POST      — первый POST проходит, второй (самоочистка) падает
 #   STUB_MUTATE_ON_GET=N       — начиная с N-го чтения сегменты блока другие
 #   STUB_IGNORE_WRITES         — POST принимается, но состояние не меняется
+#   STUB_FAIL_MEMBERS          — список участников пространства не отдаётся
 restore_stateful_stub() {
     cat > "$TMP/scripts/buildin.sh" <<STUB
 #!/usr/bin/env bash
@@ -137,6 +138,9 @@ printf '%s %s\n' "\$METHOD" "\$ENDPOINT" >> "\$LOG_DIR/calls.txt"
 case "\$ENDPOINT" in
     /api/users/me)
         echo '{"code":200,"data":{"uuid":"user-1"}}' ;;
+    /api/spaces/$SPACE/members)
+        if [ -n "\${STUB_FAIL_MEMBERS:-}" ]; then echo "Error: HTTP 403" >&2; exit 1; fi
+        echo '{"code":200,"data":[{"user":{"uuid":"user-1","nickname":"agent"}},{"user":{"uuid":"$OTHER","nickname":"j.doe"}}]}' ;;
     /api/docs/$PAGE)
         N=\$(cat "\$LOG_DIR/getn" 2>/dev/null || echo 0); N=\$((N + 1)); echo "\$N" > "\$LOG_DIR/getn"
         if [ -n "\${STUB_FAIL_GET_AFTER_WRITE:-}" ] && [ -s "\$LOG_DIR/tx-body.json" ]; then
@@ -1049,6 +1053,88 @@ if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$(thread_comments)" = "$FIRST" ] &&
     ok "comment-rollback откатывает и ответ в тред"
 else
     fail "откат ответа через comment-rollback (rc=$RC2, тред=$(thread_comments))"
+fi
+
+# ---- @-упоминания -------------------------------------------------------------
+# Сегменты текста сообщения из отправленной транзакции: uuid упоминаний и текст.
+sent_text() { python3 -c "
+import json
+ops = json.load(open('$TMP/log/tx-body.json'))['transactions'][0]['operations']
+rec = [o for o in ops if o['table'] == 'comment'][0]
+print(' | '.join(s.get('uuid') or s['text'] for s in rec['args']['text']))" 2>/dev/null; }
+
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--mention=$OTHER")
+if [ "$RC" -eq 0 ] && [ "$(sent_text)" = "$OTHER |  текст" ]; then
+    ok "--mention ставит упоминание в начало комментария"
+else
+    fail "--mention в comment (rc=$RC, текст=$(sent_text)): $(stderr | tail -2)"
+fi
+
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' --mention "$OTHER")
+if [ "$RC" -eq 0 ] && [ "$(sent_text)" = "$OTHER |  текст" ]; then
+    ok "пробельная форма --mention <uuid> принята"
+else
+    fail "пробельная форма --mention (rc=$RC): $(stderr | tail -2)"
+fi
+
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' --mention $EMPTY --dry-run)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'mention без значения'; then
+    ok "--mention с пустым значением не съедает следующий флаг"
+else
+    fail "--mention съел --dry-run (rc=$RC)"
+fi
+
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' --mention=)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'mention без значения'; then
+    ok "--mention= без uuid отвергнут"
+else
+    fail "--mention= без uuid не отвергнут (rc=$RC)"
+fi
+
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' --mention=88888888-8888-4888-8888-888888888888)
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'среди участников пространства нет'; then
+    ok "упоминание не участника пространства отвергнуто без записи"
+else
+    fail "упоминание не участника не отвергнуто (rc=$RC): $(stderr | tail -2)"
+fi
+
+export STUB_FAIL_MEMBERS=1
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--mention=$OTHER")
+unset STUB_FAIL_MEMBERS
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'не удалось получить участников'; then
+    ok "без списка участников упоминание не проверить — запись отменена"
+else
+    fail "сбой списка участников проглочен (rc=$RC): $(stderr | tail -2)"
+fi
+
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст')
+if [ "$RC" -eq 0 ] && ! grep -q '/members' "$TMP/log/calls.txt"; then
+    ok "без --mention участников не спрашиваем"
+else
+    fail "участники запрошены без --mention (rc=$RC)"
+fi
+
+RC=$(run_comment "$PAGE" "$OTHER" 'в минуту' 'текст' "--mention=$OTHER")
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'не найден на странице' && ! stderr | grep -q 'участник'; then
+    ok "блока нет на странице — отказ про блок, а не про участников"
+else
+    fail "отказ при отсутствующем блоке с --mention (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' "--mention=$OTHER")
+if [ "$RC" -eq 0 ] && [ "$(sent_text)" = "$OTHER |  ответ" ]; then
+    ok "--mention работает и в ответе"
+else
+    fail "--mention в comment-reply (rc=$RC, текст=$(sent_text)): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD" "--mention=$OTHER")
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --mention'; then
+    ok "у резолва --mention нет — флаг отвергнут"
+else
+    fail "резолв принял --mention (rc=$RC)"
 fi
 
 echo "---"

@@ -42,10 +42,11 @@
 ни ответ, ни резолв не трогают ни сегменты, ни список тредов блока.
 
 Usage:
-    buildin-comment.py [--occurrence=N] -- <doc_json> <block_id> <anchor> <text>
-                       <now_ms> <user_id>
+    buildin-comment.py [--occurrence=N] [--mention=<uuid>... --members=<file>] --
+                       <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
     buildin-comment.py --verdict -- <before_json> <after_json> <block_id> <discussion_id>
-    buildin-comment.py --reply -- <doc_json> <discussion_id> <text> <now_ms> <user_id>
+    buildin-comment.py --reply [--mention=<uuid>... --members=<file>] --
+                       <doc_json> <discussion_id> <text> <now_ms> <user_id>
     buildin-comment.py --reply-verdict -- <after_json> <discussion_id> <comment_id>
     buildin-comment.py --resolve=true|false -- <doc_json> <discussion_id>
     buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
@@ -53,6 +54,9 @@ Usage:
 
 <doc_json> — файл с ответом /api/docs (или «-» для stdin).
 --occurrence N — какое вхождение якоря выделить (1-based), когда их несколько.
+--mention — uuid участника, которого упомянуть в начале сообщения (можно
+            несколько); --members — файл с ответом /api/spaces/<space>/members
+            для их сверки.
 """
 import copy
 import json
@@ -71,6 +75,10 @@ class ThreadError(Exception):
 
 class RollbackError(Exception):
     """Файл не похож на откат команд комментариев — сообщение уже человекочитаемое."""
+
+
+class MentionError(Exception):
+    """Упоминание не прошло сверку с участниками — сообщение уже человекочитаемое."""
 
 
 # Типы блоков Buildin — та же карта, что в комментарии кейса read) файла
@@ -440,9 +448,43 @@ def check_segment_type(segments, index, pos, anchor):
     )
 
 
-def comment_segments(text):
-    """Текст сообщения сегментами — в таком виде его хранит Buildin."""
-    return [{"text": text, "type": 0, "enhancer": {}}]
+def comment_segments(text, mentions=()):
+    """Текст сообщения сегментами — в таком виде его хранит Buildin.
+
+    Упоминание — сегмент type 7 с uuid человека и пустым text: ровно так его
+    пишет UI (снято с живой страницы). Упоминания встают в начало, как
+    «@Имя, …» в UI, и разделяются пробелом, как их набирает человек.
+    """
+    segs = []
+    for uid in mentions:
+        if segs:
+            segs.append({"text": " ", "type": 0, "enhancer": {}})
+        segs.append({"text": "", "type": 7, "uuid": uid, "enhancer": {}})
+    lead = " " if mentions else ""
+    return segs + [{"text": lead + text, "type": 0, "enhancer": {}}]
+
+
+def check_mentions(mentions, members_doc):
+    """Упоминания без повторов, сверенные с участниками пространства.
+
+    Отдельного запроса на уведомление UI при упоминании не шлёт — только
+    сегмент в тексте (снято с живой страницы), — поэтому опечатка в uuid
+    дала бы упоминание никого, и тот, кого хотели позвать, ничего не узнал бы.
+    """
+    if not mentions:
+        return []
+    data = members_doc.get("data") if isinstance(members_doc, dict) else None
+    if not isinstance(data, list):
+        raise MentionError("список участников пространства не получен — упоминание не проверить.")
+    known = {(m.get("user") or {}).get("uuid") for m in data if isinstance(m, dict)}
+    unknown = [u for u in mentions if u not in known]
+    if unknown:
+        raise MentionError(
+            "среди участников пространства нет %s.\n"
+            "uuid участника — поле user.uuid в ответе buildin.sh GET /api/spaces/<space_id>/members."
+            % ", ".join(unknown)
+        )
+    return list(dict.fromkeys(mentions))
 
 
 def comment_record(comment_id, space_id, discussion_id, segments, who):
@@ -463,7 +505,7 @@ def comment_record(comment_id, space_id, discussion_id, segments, who):
     }
 
 
-def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None):
+def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None, mentions=()):
     """Операции транзакции и операции отката. Без сети и без записи на диск."""
     if not text:
         raise AnchorError("Текст комментария пустой — нечего отправлять.")
@@ -494,7 +536,7 @@ def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None):
                 **who
             ),
         },
-        comment_record(comment_id, space_id, discussion_id, comment_segments(text), who),
+        comment_record(comment_id, space_id, discussion_id, comment_segments(text, mentions), who),
         # Узко: только segments. Полный data стирал бы чужие ключи блока.
         {"id": block_id, "command": "update", "table": "block", "path": ["data"],
          "args": {"segments": new_segments}},
@@ -599,7 +641,7 @@ def live_thread(doc, discussion_id):
     return thread
 
 
-def build_reply_ops(thread, discussion_id, text, now, user_id):
+def build_reply_ops(thread, discussion_id, text, now, user_id, mentions=()):
     """Операции ответа в тред и их откат. Без сети и без записи на диск.
 
     Ровно то, что шлёт UI (снято с живой страницы): запись comment и listAfter
@@ -621,7 +663,7 @@ def build_reply_ops(thread, discussion_id, text, now, user_id):
     comment_id = str(uuid.uuid4())
     who = {"createdAt": now, "createdBy": user_id, "updatedAt": now, "updatedBy": user_id}
     ops = [
-        comment_record(comment_id, space_id, discussion_id, comment_segments(text), who),
+        comment_record(comment_id, space_id, discussion_id, comment_segments(text, mentions), who),
         {"id": discussion_id, "command": "listAfter", "table": "discussion", "path": ["comments"],
          "args": {"uuid": comment_id}},
     ]
@@ -755,7 +797,7 @@ ARITY = {
 def parse_args(argv):
     """(режим, позиционные, опции); ошибка разбора — SystemExit с причиной."""
     positional, end_of_opts, mode = [], False, "build"
-    opts = {"occurrence": None, "resolved": None}
+    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None}
     for a in argv:
         if end_of_opts or not a.startswith("--"):
             positional.append(a)
@@ -776,6 +818,10 @@ def parse_args(argv):
             if not raw.isdigit() or int(raw) < 1:
                 raise SystemExit("Error: --occurrence ожидает целое число >= 1, получено: %r" % raw)
             opts["occurrence"] = int(raw)
+        elif a.startswith("--mention="):
+            opts["mentions"].append(a.split("=", 1)[1])
+        elif a.startswith("--members="):
+            opts["members"] = a.split("=", 1)[1]
         else:
             raise SystemExit("Error: неизвестный флаг: %s" % a)
     if len(positional) != ARITY[mode]:
@@ -791,6 +837,16 @@ def load_doc(path):
         return {}
 
 
+def mentions_from(opts):
+    """Упоминания из --mention, сверенные с ответом /members из --members.
+
+    Сверка идёт после проверки блока или треда: если их на странице нет, о
+    том и надо сказать, а не о пустом списке участников.
+    """
+    members = load_doc(opts["members"]) if opts["members"] else None
+    return check_mentions(opts["mentions"], members)
+
+
 def build_comment(args, opts):
     """Режим по умолчанию: операции нового треда на фразе блока."""
     doc_json, block_id, anchor, text, now, user_id = args
@@ -800,7 +856,8 @@ def build_comment(args, opts):
             "Error: блок %s не найден на странице. "
             "Идентификаторы блоков — поле uuid в выводе `buildin-pages.sh get-blocks`." % block_id
         )
-    return build_ops(block, block_id, anchor, text, int(now), user_id, opts["occurrence"])
+    return build_ops(block, block_id, anchor, text, int(now), user_id, opts["occurrence"],
+                     mentions_from(opts))
 
 
 def main():
@@ -814,7 +871,8 @@ def main():
         elif mode == "reply":
             doc_json, discussion_id, text, now, user_id = args
             thread = live_thread(load_doc(doc_json), discussion_id)
-            print(json.dumps(build_reply_ops(thread, discussion_id, text, int(now), user_id)))
+            print(json.dumps(build_reply_ops(thread, discussion_id, text, int(now), user_id,
+                                             mentions_from(opts))))
         elif mode == "reply-verdict":
             after_path, discussion_id, comment_id = args
             print(reply_verdict(load_doc(after_path), discussion_id, comment_id))
@@ -837,6 +895,8 @@ def main():
         raise SystemExit("Error: %s" % e)
     except RollbackError as e:
         raise SystemExit("Error: файл отката отвергнут, %s" % e)
+    except MentionError as e:
+        raise SystemExit("Error: упоминание отвергнуто — %s" % e)
 
 
 if __name__ == "__main__":

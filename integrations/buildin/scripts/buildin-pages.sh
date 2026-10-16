@@ -17,7 +17,7 @@
 #   comments <page_id|url[#block_id]> [block_id] — комментарии страницы или конкретного блока
 #                                                  (URL с якорем #block-uuid фильтрует по блоку)
 #   comment <page_id|url[#block_id]> [block_id] <anchor> <text>
-#           [--dry-run] [--occurrence=N] [--rollback-out=<path>]
+#           [--dry-run] [--occurrence=N] [--rollback-out=<path>] [--mention=<user_uuid>]...
 #                                                — создать комментарий к фразе <anchor> внутри блока
 #                                                  <anchor>/<text>: строка, «@путь» — файл, «-» — stdin
 #                                                  («@@текст» — литеральный «@текст»; значение с ведущими
@@ -29,8 +29,11 @@
 #                                                  подсветки не будет, поэтому отказ
 #                                                  дату и инлайн-формулу внутри блока — только
 #                                                  целиком: разрез формулу ломает
+#                                                  --mention — @-упоминание участника в начале текста
+#                                                  (можно несколько; uuid сверяется с участниками)
 #   comment-reply <page_id|url> <discussion_id> <text> [--dry-run] [--rollback-out=<path>]
-#                                                — ответить в тред; <text> — те же формы, что у comment;
+#                 [--mention=<user_uuid>]...
+#                                                — ответить в тред; <text> и --mention — как у comment;
 #                                                  в закрытый тред — отказ, сначала comment-unresolve
 #   comment-resolve <page_id|url> <discussion_id> [--dry-run]
 #                                                — закрыть тред (резолв); уже закрытый — без записи
@@ -120,7 +123,7 @@ parse_page_and_block_id() {
 # Флаги команд комментариев — один разбор на comment, comment-reply и
 # comment-resolve/unresolve: копии цикла разошлись бы молча. $1 — разрешённые
 # флаги через пробел, дальше аргументы команды. Выставляет DRY_RUN,
-# ROLLBACK_OUT, OCCURRENCE и массив ARGS с позиционными.
+# ROLLBACK_OUT, OCCURRENCE, массив MENTIONS и массив ARGS с позиционными.
 #
 # Неизвестные «--»-токены отвергаются, а не сваливаются в позиционные: иначе
 # опечатка «--dryrun» молча делает боевую запись вместо превью. Флаг, который
@@ -132,6 +135,7 @@ parse_comment_flags() {
     DRY_RUN=""
     ROLLBACK_OUT=""
     OCCURRENCE=""
+    MENTIONS=()
     ARGS=()
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == --?* ]]; then
@@ -149,6 +153,12 @@ parse_comment_flags() {
             --rollback-out)    shift; ROLLBACK_OUT="${1:-}"
                                [[ -n "$ROLLBACK_OUT" && "$ROLLBACK_OUT" != --* ]] || {
                                    echo "Error: --rollback-out без значения" >&2; exit 1; } ;;
+            --mention=*)       [[ -n "${1#*=}" ]] || { echo "Error: --mention без значения" >&2; exit 1; }
+                               MENTIONS+=("${1#*=}") ;;
+            --mention)         shift
+                               [[ -n "${1:-}" && "${1:-}" != --* ]] || {
+                                   echo "Error: --mention без значения" >&2; exit 1; }
+                               MENTIONS+=("$1") ;;
             --)                shift; while [[ $# -gt 0 ]]; do ARGS+=("$1"); shift; done; break ;;
             --*)               echo "Error: неизвестный флаг: $1" >&2; echo "$USAGE" >&2; exit 1 ;;
             *)                 ARGS+=("$1") ;;
@@ -216,6 +226,35 @@ transaction() {
     local body
     body=$(tx_body "$SPACE_ID" "$OPERATIONS") || return
     buildin POST "/api/records/transactions" "$body"
+}
+
+# Аргументы билдера для @-упоминаний: файл участников пространства (для
+# сверки uuid) и сами --mention. Пространство берётся у блока или треда из
+# уже прочитанного /api/docs. Если их на странице нет, участников не
+# спрашиваем: об отсутствии скажет билдер, и это сообщение точнее.
+# Выставляет массив MENTION_ARGS и MEMBERS_FILE — его удаляет trap команды.
+# $1 — файл /api/docs, $2 — id блока или треда.
+mention_args() {
+    local space m
+    MENTION_ARGS=()
+    [[ ${#MENTIONS[@]} -gt 0 ]] || return 0
+    MEMBERS_FILE=$(mktemp)
+    space=$(python3 -c "
+import json, sys
+data = json.load(open(sys.argv[1], encoding='utf-8')).get('data') or {}
+rec = (data.get('blocks') or {}).get(sys.argv[2]) or (data.get('discussions') or {}).get(sys.argv[2]) or {}
+print(rec.get('spaceId', ''))
+" "$1" "$2")
+    if [[ -z "$space" ]]; then
+        echo '{}' > "$MEMBERS_FILE"
+    elif ! buildin GET "/api/spaces/$space/members" > "$MEMBERS_FILE"; then
+        echo "Error: не удалось получить участников пространства — упоминание не проверить, запись отменена." >&2
+        exit 1
+    fi
+    MENTION_ARGS+=("--members=$MEMBERS_FILE")
+    for m in "${MENTIONS[@]}"; do
+        MENTION_ARGS+=("--mention=$m")
+    done
 }
 
 # Файл отката — готовое тело запроса. Один на comment и comment-reply: права
@@ -530,6 +569,7 @@ if not found:
 
     comment)
         USAGE='Usage: comment <page_id|url[#block_id]> [block_id] <anchor> <text> [--dry-run] [--occurrence=N] [--rollback-out=<path>]
+                [--mention=<user_uuid>]...
   <anchor>, <text>: строка, «@путь» — содержимое файла, «-» — stdin
                     («@@текст» — литеральный «@текст»; значение с ведущими
                      дефисами — после разделителя «--»)
@@ -540,7 +580,7 @@ if not found:
         INPUT="$1"
         [[ -z "$INPUT" ]] && { echo "$USAGE" >&2; exit 1; }
         shift
-        parse_comment_flags "dry-run occurrence rollback-out" "$@"
+        parse_comment_flags "dry-run occurrence rollback-out mention" "$@"
 
         parse_page_and_block_id "$INPUT"
         # Первый позиционный считаем блоком, только если он целиком UUID: якорь
@@ -565,16 +605,18 @@ if not found:
         DOC_FILE=$(mktemp)
         FRESH_FILE=""
         OPS_DIR=""
-        trap 'rm -rf "$DOC_FILE" ${FRESH_FILE:+"$FRESH_FILE"} ${OPS_DIR:+"$OPS_DIR"}' EXIT
+        MEMBERS_FILE=""
+        trap 'rm -rf "$DOC_FILE" ${FRESH_FILE:+"$FRESH_FILE"} ${OPS_DIR:+"$OPS_DIR"} ${MEMBERS_FILE:+"$MEMBERS_FILE"}' EXIT
 
         buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"
         NOW=$(python3 -c "import time; print(int(time.time()*1000))")
         USER_ID=$(buildin GET "/api/users/me" | python3 -c "import sys,json; print(json.load(sys.stdin).get('data',{}).get('uuid',''))")
+        mention_args "$DOC_FILE" "$BLOCK_ID"
 
         # «--» обязателен: без него якорь или текст с ведущими дефисами билдер
         # примет за флаг, и файловая форма ввода от этого не спасает.
         BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" \
-            ${OCCURRENCE:+--occurrence="$OCCURRENCE"} -- \
+            ${OCCURRENCE:+--occurrence="$OCCURRENCE"} ${MENTION_ARGS[@]+"${MENTION_ARGS[@]}"} -- \
             "$DOC_FILE" "$BLOCK_ID" "$ANCHOR" "$TEXT" "$NOW" "$USER_ID")
 
         if [[ -n "$DRY_RUN" ]]; then
@@ -709,6 +751,7 @@ print(built['discussion'])
 
     comment-reply)
         USAGE='Usage: comment-reply <page_id|url> <discussion_id> <text> [--dry-run] [--rollback-out=<path>]
+                      [--mention=<user_uuid>]...
   <discussion_id>: строка «Тред <uuid>» в выводе comments; страница — та, где висит тред
   <text>: строка, «@путь» — содержимое файла, «-» — stdin
           («@@текст» — литеральный «@текст»; значение с ведущими
@@ -717,7 +760,7 @@ print(built['discussion'])
         INPUT="$1"
         [[ -z "$INPUT" ]] && { echo "$USAGE" >&2; exit 1; }
         shift
-        parse_comment_flags "dry-run rollback-out" "$@"
+        parse_comment_flags "dry-run rollback-out mention" "$@"
 
         parse_page_and_block_id "$INPUT"
         [[ ${#ARGS[@]} -eq 2 ]] || { echo "Error: ожидались ровно <discussion_id> и <text>, получено: ${#ARGS[@]}" >&2; echo "$USAGE" >&2; exit 1; }
@@ -730,14 +773,16 @@ print(built['discussion'])
 
         DOC_FILE=$(mktemp)
         OPS_DIR=""
-        trap 'rm -rf "$DOC_FILE" ${OPS_DIR:+"$OPS_DIR"}' EXIT
+        MEMBERS_FILE=""
+        trap 'rm -rf "$DOC_FILE" ${OPS_DIR:+"$OPS_DIR"} ${MEMBERS_FILE:+"$MEMBERS_FILE"}' EXIT
 
         buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"
         NOW=$(python3 -c "import time; print(int(time.time()*1000))")
         USER_ID=$(get_user_id)
+        mention_args "$DOC_FILE" "$DISCUSSION"
 
         # «--» обязателен: текст с ведущими дефисами билдер иначе принял бы за флаг.
-        BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply -- \
+        BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply ${MENTION_ARGS[@]+"${MENTION_ARGS[@]}"} -- \
             "$DOC_FILE" "$DISCUSSION" "$TEXT" "$NOW" "$USER_ID")
 
         if [[ -n "$DRY_RUN" ]]; then

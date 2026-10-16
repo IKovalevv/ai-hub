@@ -841,3 +841,61 @@ PY
     echo "$output"
     [ "$status" -eq 0 ]
 }
+
+# ---- @-упоминания -----------------------------------------------------------
+
+JDOE=55555555-5555-4555-8555-555555555555
+ASMITH=99999999-9999-4999-8999-999999999999
+
+# Ответ /api/spaces/<space>/members с двумя участниками.
+mkmembers() {
+    printf '{"code":200,"data":[{"user":{"uuid":"%s","nickname":"j.doe"}},{"user":{"uuid":"%s","nickname":"a.smith"}}]}' \
+        "$JDOE" "$ASMITH" > "$BATS_TEST_TMPDIR/members.json"
+}
+
+@test "a mention leads the message as a type 7 segment, exactly as the UI writes it" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    mkmembers
+    result=$(build "beta" "посмотри" "--mention=$JDOE" "--members=$BATS_TEST_TMPDIR/members.json" | probe "print(comment['args']['text'])")
+    [ "$result" = "[{'text': '', 'type': 7, 'uuid': '$JDOE', 'enhancer': {}}, {'text': ' посмотри', 'type': 0, 'enhancer': {}}]" ]
+}
+
+@test "several mentions are separated by spaces and repeats collapse" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    mkmembers
+    result=$(build "beta" "гляньте" "--mention=$JDOE" "--mention=$ASMITH" "--mention=$JDOE" "--members=$BATS_TEST_TMPDIR/members.json" \
+        | probe "print([s.get('uuid') or s['text'] for s in comment['args']['text']])")
+    [ "$result" = "['$JDOE', ' ', '$ASMITH', ' гляньте']" ]
+}
+
+@test "a mention of someone outside the space is refused with a hint where uuids live" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    mkmembers
+    err=$(build_stderr "beta" "note" "--mention=88888888-8888-4888-8888-888888888888" "--members=$BATS_TEST_TMPDIR/members.json") || true
+    [[ "$err" == *"среди участников пространства нет 88888888-8888-4888-8888-888888888888"* ]] || false
+    [[ "$err" == *"/api/spaces/<space_id>/members"* ]]
+}
+
+@test "a mention without a members list is refused" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    printf '{"code":500,"msg":"no rights"}' > "$BATS_TEST_TMPDIR/members.json"
+    err=$(build_stderr "beta" "note" "--mention=$JDOE" "--members=$BATS_TEST_TMPDIR/members.json") || true
+    [[ "$err" == *"список участников пространства не получен"* ]]
+}
+
+@test "a reply carries the mention the same way" {
+    mkthread false
+    mkmembers
+    result=$(python3 "$OPS_PY" --reply "--mention=$JDOE" "--members=$BATS_TEST_TMPDIR/members.json" -- \
+        "$DOC" "$THREAD" "ответ" "$NOW" "$USER" 2>/dev/null \
+        | python3 -c "import json, sys; print([s.get('uuid') or s['text'] for s in json.load(sys.stdin)['ops'][0]['args']['text']])")
+    [ "$result" = "['$JDOE', ' ответ']" ]
+}
+
+@test "mentions are checked only after the block and the thread are found" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    err=$(python3 "$OPS_PY" "--mention=$JDOE" -- "$DOC" "44444444-4444-4444-4444-444444444444" "beta" "note" "$NOW" "$USER" 2>&1 >/dev/null) || true
+    [[ "$err" == *"не найден на странице"* ]] || false
+    err=$(python3 "$OPS_PY" --reply "--mention=$JDOE" -- "$DOC" "$THREAD" "ответ" "$NOW" "$USER" 2>&1 >/dev/null) || true
+    [[ "$err" == *"Треда $THREAD на странице нет"* ]]
+}
