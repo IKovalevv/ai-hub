@@ -701,3 +701,76 @@ resolve_verdict() { python3 "$OPS_PY" --resolve-verdict="$2" -- "$1" "$THREAD"; 
     mkdoc '[{"text": "alpha", "type": 0, "enhancer": {}}]'
     [ "$(resolve_verdict "$DOC" true)" = "unverified" ]
 }
+
+# ---- ответ в тред -----------------------------------------------------------
+
+reply() { python3 "$OPS_PY" --reply -- "$DOC" "$THREAD" "$1" "$NOW" "$USER" 2>/dev/null; }
+reply_stderr() { python3 "$OPS_PY" --reply -- "$DOC" "$THREAD" "$1" "$NOW" "$USER" 2>&1 >/dev/null; }
+
+@test "reply is a comment record plus a list op on the thread, exactly as the UI sends it" {
+    mkthread false
+    result=$(reply "ответ" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+rec, lst = r['ops']
+print(len(r['ops']), rec['command'], rec['table'], rec['args']['parentId'] == '$THREAD',
+      rec['args']['text'], lst['command'], lst['table'], lst['path'], lst['args'] == {'uuid': r['comment']})")
+    [ "$result" = "2 set comment True [{'text': 'ответ', 'type': 0, 'enhancer': {}}] listAfter discussion ['comments'] True" ]
+}
+
+@test "reply record has the same shape as the first message of a new thread" {
+    mkthread false
+    reply "ответ" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['ops'][0]['args']))" > "$BATS_TEST_TMPDIR/reply.json"
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    build "beta" "ответ" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['ops'][1]['args']))" > "$BATS_TEST_TMPDIR/first.json"
+    run python3 -c "
+import json, sys
+a, b = ({k: v for k, v in json.load(open(p)).items() if k not in ('uuid', 'parentId')} for p in sys.argv[1:3])
+print(a, b)
+sys.exit(0 if a == b else 1)
+" "$BATS_TEST_TMPDIR/reply.json" "$BATS_TEST_TMPDIR/first.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "reply rollback takes the message out of the thread and retires it" {
+    mkthread false
+    result=$(reply "ответ" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+rb = r['rollback']
+print([(o['command'], o['table'], o['path']) for o in rb],
+      rb[0]['args'] == {'uuid': r['comment']}, rb[1]['id'] == r['comment'], rb[1]['args']['status'])")
+    [ "$result" = "[('listRemove', 'discussion', ['comments']), ('update', 'comment', [])] True True -1" ]
+}
+
+@test "reply into a resolved thread is refused with a hint to reopen it" {
+    mkthread true
+    err=$(reply_stderr "ответ") || true
+    [[ "$err" == *"Тред $THREAD закрыт"* ]]
+    [[ "$err" == *"comment-unresolve"* ]]
+}
+
+@test "reply to a thread missing from the page is refused" {
+    mkdoc '[{"text": "alpha", "type": 0, "enhancer": {}}]'
+    err=$(reply_stderr "ответ") || true
+    [[ "$err" == *"Треда $THREAD на странице нет"* ]]
+}
+
+@test "empty reply text is refused" {
+    mkthread false
+    err=$(reply_stderr "") || true
+    [[ "$err" == *"Текст ответа пустой"* ]]
+}
+
+reply_verdict() { python3 "$OPS_PY" --reply-verdict -- "$1" "$THREAD" "$2"; }
+
+@test "reply verdict: our message in the thread is ok, an absent one is not-applied" {
+    mkthread false
+    [ "$(reply_verdict "$DOC" 77777777-7777-4777-8777-777777777777)" = "ok" ]
+    [ "$(reply_verdict "$DOC" 88888888-8888-4888-8888-888888888888)" = "not-applied" ]
+}
+
+@test "reply verdict: error envelope or missing thread is unverified" {
+    printf '{"code":500,"msg":"no rights"}' > "$BATS_TEST_TMPDIR/a.json"
+    [ "$(reply_verdict "$BATS_TEST_TMPDIR/a.json" 77777777-7777-4777-8777-777777777777)" = "unverified" ]
+}

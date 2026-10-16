@@ -299,6 +299,18 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" insert-blocks-before "<page_id>" "<bloc
    bash "$BUILDIN_SCRIPTS/buildin.sh" POST /api/records/transactions "$(cat <путь>)"
    ```
 
+   **Ответ в тред** — продолжить существующее обсуждение. Id треда — строка
+   `Тред <uuid>` в выводе `comments`; текст — в тех же формах, что у `comment`,
+   и тоже лучше файлом:
+
+   ```bash
+   bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-reply "<page_id>" "<discussion_uuid>" -- "@$f"
+   ```
+
+   В закрытый тред команда не пишет: сначала `comment-unresolve`. Коды выхода
+   и файл отката — как у `comment`; при успехе в stdout приходит строка
+   `comment: <uuid>`.
+
    **Резолв треда** — закрыть обсуждение или открыть его заново. Id треда —
    строка `Тред <uuid>` в выводе `comments`:
 

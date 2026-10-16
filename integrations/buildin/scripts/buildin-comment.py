@@ -37,13 +37,16 @@
 проверен живьём: x^{2} по «{2» превратилась в три формулы, и Buildin рисует
 все три ошибкой разбора. Такие объекты комментируются только целиком.
 
-Резолв треда (и его отмена) — одна узкая запись поля resolved: ровно это шлёт
-UI, сегменты и список тредов блока он не трогает.
+Ответ в тред — запись comment и listAfter в список comments треда, а резолв
+треда (и его отмена) — одна узкая запись поля resolved. Ровно это шлёт UI:
+ни ответ, ни резолв не трогают ни сегменты, ни список тредов блока.
 
 Usage:
     buildin-comment.py [--occurrence=N] -- <doc_json> <block_id> <anchor> <text>
                        <now_ms> <user_id>
     buildin-comment.py --verdict -- <before_json> <after_json> <block_id> <discussion_id>
+    buildin-comment.py --reply -- <doc_json> <discussion_id> <text> <now_ms> <user_id>
+    buildin-comment.py --reply-verdict -- <after_json> <discussion_id> <comment_id>
     buildin-comment.py --resolve=true|false -- <doc_json> <discussion_id>
     buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
 
@@ -431,6 +434,29 @@ def check_segment_type(segments, index, pos, anchor):
     )
 
 
+def comment_segments(text):
+    """Текст сообщения сегментами — в таком виде его хранит Buildin."""
+    return [{"text": text, "type": 0, "enhancer": {}}]
+
+
+def comment_record(comment_id, space_id, discussion_id, segments, who):
+    """Запись comment — одна форма на первое сообщение треда и на ответ в него.
+
+    Две копии разошлись бы молча: ответ, собранный иначе, чем первое
+    сообщение, всплыл бы только в UI.
+    """
+    return {
+        "id": comment_id,
+        "command": "set",
+        "table": "comment",
+        "path": [],
+        "args": dict(
+            uuid=comment_id, spaceId=space_id, parentId=discussion_id,
+            version=1, status=1, text=segments, **who
+        ),
+    }
+
+
 def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None):
     """Операции транзакции и операции отката. Без сети и без записи на диск."""
     if not text:
@@ -462,18 +488,7 @@ def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None):
                 **who
             ),
         },
-        {
-            "id": comment_id,
-            "command": "set",
-            "table": "comment",
-            "path": [],
-            "args": dict(
-                uuid=comment_id, spaceId=space_id, parentId=discussion_id,
-                version=1, status=1,
-                text=[{"text": text, "type": 0, "enhancer": {}}],
-                **who
-            ),
-        },
+        comment_record(comment_id, space_id, discussion_id, comment_segments(text), who),
         # Узко: только segments. Полный data стирал бы чужие ключи блока.
         {"id": block_id, "command": "update", "table": "block", "path": ["data"],
          "args": {"segments": new_segments}},
@@ -578,6 +593,59 @@ def live_thread(doc, discussion_id):
     return thread
 
 
+def build_reply_ops(thread, discussion_id, text, now, user_id):
+    """Операции ответа в тред и их откат. Без сети и без записи на диск.
+
+    Ровно то, что шлёт UI (снято с живой страницы): запись comment и listAfter
+    в список comments треда, сам тред и блок ответ не трогает. Операция над
+    списком узкая: перезапись полного списка выбила бы параллельный ответ.
+    """
+    if not text:
+        raise ThreadError("Текст ответа пустой — нечего отправлять.")
+    # Закрытый тред Buildin на странице не показывает — подсветка и бейдж
+    # пропадают, — и ответ в нём легко не заметить никому. Тихий успех хуже
+    # отказа: открыть тред агент может сам, явной командой.
+    if thread.get("resolved"):
+        raise ThreadError(
+            "Тред %s закрыт: на странице его не видно, и ответ в нём легко пропустить.\n"
+            "Сначала откройте тред: buildin-pages.sh comment-unresolve <page> %s"
+            % (discussion_id, discussion_id)
+        )
+    space_id = thread.get("spaceId", "")
+    comment_id = str(uuid.uuid4())
+    who = {"createdAt": now, "createdBy": user_id, "updatedAt": now, "updatedBy": user_id}
+    ops = [
+        comment_record(comment_id, space_id, discussion_id, comment_segments(text), who),
+        {"id": discussion_id, "command": "listAfter", "table": "discussion", "path": ["comments"],
+         "args": {"uuid": comment_id}},
+    ]
+    # Откат по образцу отката comment: сообщение вон из списка треда и гасится
+    # (status -1), чтобы после отката его не показывала и команда comments.
+    rollback = [
+        {"id": discussion_id, "command": "listRemove", "table": "discussion", "path": ["comments"],
+         "args": {"uuid": comment_id}},
+        {"id": comment_id, "command": "update", "table": "comment", "path": [],
+         "args": {"status": -1, "updatedAt": now, "updatedBy": user_id}},
+    ]
+    return {"ops": ops, "rollback": rollback, "comment": comment_id,
+            "discussion": discussion_id, "space": space_id}
+
+
+def reply_verdict(after, discussion_id, comment_id):
+    """Исход ответа по снимку после записи.
+
+      unverified  — треда нет в ответе: конверт ошибки или чужая страница;
+      not-applied — нашего сообщения нет в списке треда. listAfter аддитивен,
+                    параллельный ответ наш id не выбивает, значит транзакция
+                    не легла: создавать было нечего, повтор безопасен;
+      ok          — сообщение в треде.
+    """
+    thread = find_thread(after, discussion_id)
+    if thread is None:
+        return "unverified"
+    return "ok" if comment_id in (thread.get("comments") or []) else "not-applied"
+
+
 def build_resolve_ops(thread, discussion_id, resolved):
     """Операция резолва треда или его отмены; пустой список — тред уже в нужном состоянии.
 
@@ -611,6 +679,8 @@ def resolve_verdict(after, discussion_id, resolved):
 ARITY = {
     "build": 6,            # <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
     "verdict": 4,          # <before_json> <after_json> <block_id> <discussion_id>
+    "reply": 5,            # <doc_json> <discussion_id> <text> <now_ms> <user_id>
+    "reply-verdict": 3,    # <after_json> <discussion_id> <comment_id>
     "resolve": 2,          # <doc_json> <discussion_id>
     "resolve-verdict": 2,  # <after_json> <discussion_id>
 }
@@ -628,8 +698,8 @@ def parse_args(argv):
             # дефисами («--force», «-- не согласен») не доходит до билдера
             # никакой формой ввода: они едут через argv, в том числе из @file.
             end_of_opts = True
-        elif a == "--verdict":
-            mode = "verdict"
+        elif a in ("--verdict", "--reply", "--reply-verdict"):
+            mode = a[2:]
         elif a.split("=", 1)[0] in ("--resolve", "--resolve-verdict"):
             flag, _, raw = a.partition("=")
             if raw not in ("true", "false"):
@@ -675,6 +745,13 @@ def main():
             status, lost = verdict(load_doc(before_path), load_doc(after_path), block_id, ours)
             print(status)
             print(" ".join(lost))
+        elif mode == "reply":
+            doc_json, discussion_id, text, now, user_id = args
+            thread = live_thread(load_doc(doc_json), discussion_id)
+            print(json.dumps(build_reply_ops(thread, discussion_id, text, int(now), user_id)))
+        elif mode == "reply-verdict":
+            after_path, discussion_id, comment_id = args
+            print(reply_verdict(load_doc(after_path), discussion_id, comment_id))
         elif mode == "resolve":
             doc_json, discussion_id = args
             thread = live_thread(load_doc(doc_json), discussion_id)

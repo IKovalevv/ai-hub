@@ -29,6 +29,9 @@
 #                                                  подсветки не будет, поэтому отказ
 #                                                  дату и инлайн-формулу внутри блока — только
 #                                                  целиком: разрез формулу ломает
+#   comment-reply <page_id|url> <discussion_id> <text> [--dry-run] [--rollback-out=<path>]
+#                                                — ответить в тред; <text> — те же формы, что у comment;
+#                                                  в закрытый тред — отказ, сначала comment-unresolve
 #   comment-resolve <page_id|url> <discussion_id> [--dry-run]
 #                                                — закрыть тред (резолв); уже закрытый — без записи
 #   comment-unresolve <page_id|url> <discussion_id> [--dry-run]
@@ -112,10 +115,10 @@ parse_page_and_block_id() {
     fi
 }
 
-# Флаги команд комментариев — один разбор на comment и comment-resolve/
-# unresolve: копии цикла разошлись бы молча. $1 — разрешённые флаги через
-# пробел, дальше аргументы команды. Выставляет DRY_RUN, ROLLBACK_OUT,
-# OCCURRENCE и массив ARGS с позиционными.
+# Флаги команд комментариев — один разбор на comment, comment-reply и
+# comment-resolve/unresolve: копии цикла разошлись бы молча. $1 — разрешённые
+# флаги через пробел, дальше аргументы команды. Выставляет DRY_RUN,
+# ROLLBACK_OUT, OCCURRENCE и массив ARGS с позиционными.
 #
 # Неизвестные «--»-токены отвергаются, а не сваливаются в позиционные: иначе
 # опечатка «--dryrun» молча делает боевую запись вместо превью. Флаг, который
@@ -211,6 +214,20 @@ transaction() {
     local body
     body=$(tx_body "$SPACE_ID" "$OPERATIONS") || return
     buildin POST "/api/records/transactions" "$body"
+}
+
+# Файл отката — готовое тело запроса. Один на comment и comment-reply: права
+# и дефолтное имя у двух копий разошлись бы молча. $1 — spaceId, $2 — файл с
+# операциями отката. Путь — из ROLLBACK_OUT, а без него — свежий mktemp.
+write_rollback() {
+    local body
+    [[ -n "$ROLLBACK_OUT" ]] || ROLLBACK_OUT=$(mktemp "${TMPDIR:-/tmp}/buildin-rollback-XXXXXX")
+    body=$(tx_body "$1" "$(cat "$2")") || return
+    # umask 077 на подоболочку: дефолтный путь создаёт mktemp с правами 0600,
+    # а перенаправление по --rollback-out дало бы права по umask, хотя в
+    # файле лежит полный текст блока. У уже существующего файла права свои.
+    (umask 077; printf '%s\n' "$body" > "$ROLLBACK_OUT")
+    echo "Откат: $ROLLBACK_OUT" >&2
 }
 
 COMMAND="${1:-help}"
@@ -593,7 +610,6 @@ if segs(sys.argv[1]) != segs(sys.argv[2]):
              '       Повторите команду: она возьмёт свежее состояние блока.')
 " "$DOC_FILE" "$FRESH_FILE" "$BLOCK_ID"
 
-        [[ -n "$ROLLBACK_OUT" ]] || ROLLBACK_OUT=$(mktemp "${TMPDIR:-/tmp}/buildin-rollback-XXXXXX")
         OPS_DIR=$(mktemp -d)
         DISCUSSION=$(echo "$BUILT" | python3 -c "
 import json, os, sys
@@ -603,13 +619,7 @@ for key in ('ops', 'rollback', 'rollback_records'):
     open(os.path.join(out, key + '.json'), 'w').write(json.dumps(built[key]))
 print(built['discussion'])
 " "$OPS_DIR")
-
-        ROLLBACK_BODY=$(tx_body "$SPACE_ID" "$(cat "$OPS_DIR/rollback.json")")
-        # umask 077 на подоболочку: дефолтный путь создаёт mktemp с правами 0600,
-        # а перенаправление по --rollback-out дало бы права по umask, хотя в
-        # файле лежит полный текст блока. У уже существующего файла права свои.
-        (umask 077; printf '%s\n' "$ROLLBACK_BODY" > "$ROLLBACK_OUT")
-        echo "Откат: $ROLLBACK_OUT" >&2
+        write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json"
 
         # О созданном треде сообщаем ДО записи: id известен сразу после билдера,
         # а если POST оборвётся, узнать его будет неоткуда — curl в buildin.sh
@@ -693,6 +703,91 @@ print(built['discussion'])
             echo "          Иначе вернуть подсветку можно только новым комментарием: сама" >&2
             echo "          команда не угадывает, к какой фразе чужой тред был привязан." >&2
         fi
+        ;;
+
+    comment-reply)
+        USAGE='Usage: comment-reply <page_id|url> <discussion_id> <text> [--dry-run] [--rollback-out=<path>]
+  <discussion_id>: строка «Тред <uuid>» в выводе comments; страница — та, где висит тред
+  <text>: строка, «@путь» — содержимое файла, «-» — stdin
+          («@@текст» — литеральный «@текст»; значение с ведущими
+           дефисами — после разделителя «--»)
+  в закрытый тред ответ не пишется: сначала comment-unresolve'
+        INPUT="$1"
+        [[ -z "$INPUT" ]] && { echo "$USAGE" >&2; exit 1; }
+        shift
+        parse_comment_flags "dry-run rollback-out" "$@"
+
+        parse_page_and_block_id "$INPUT"
+        [[ ${#ARGS[@]} -eq 2 ]] || { echo "Error: ожидались ровно <discussion_id> и <text>, получено: ${#ARGS[@]}" >&2; echo "$USAGE" >&2; exit 1; }
+        DISCUSSION="${ARGS[0]}"
+        [[ "$DISCUSSION" =~ ^$UUID_RE$ ]] || { echo "Error: <discussion_id> — не UUID: $DISCUSSION" >&2; echo "$USAGE" >&2; exit 1; }
+        TEXT=$(read_arg_text "${ARGS[1]}")
+        # Проверяем РАЗВЁРНУТОЕ значение: пустой файл и пустой stdin дают
+        # непустой сигил, и ответ без текста ушёл бы в живой тред.
+        [[ -z "$TEXT" ]] && { echo "Error: текст ответа пустой" >&2; exit 1; }
+
+        DOC_FILE=$(mktemp)
+        OPS_DIR=""
+        trap 'rm -rf "$DOC_FILE" ${OPS_DIR:+"$OPS_DIR"}' EXIT
+
+        buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"
+        NOW=$(python3 -c "import time; print(int(time.time()*1000))")
+        USER_ID=$(get_user_id)
+
+        # «--» обязателен: текст с ведущими дефисами билдер иначе принял бы за флаг.
+        BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply -- \
+            "$DOC_FILE" "$DISCUSSION" "$TEXT" "$NOW" "$USER_ID")
+
+        if [[ -n "$DRY_RUN" ]]; then
+            # Превью не пишет и файл отката: он затёр бы откат предыдущей
+            # реальной записи.
+            echo "$BUILT" | python3 -c "
+import json, sys
+out = json.dumps(json.load(sys.stdin)['ops'], ensure_ascii=False, indent=2)
+sys.stdout.buffer.write(out.encode('utf-8') + b'\n')"
+            exit 0
+        fi
+
+        OPS_DIR=$(mktemp -d)
+        COMMENT_ID=$(echo "$BUILT" | python3 -c "
+import json, os, sys
+out = sys.argv[1]
+built = json.load(sys.stdin)
+for key in ('ops', 'rollback'):
+    open(os.path.join(out, key + '.json'), 'w').write(json.dumps(built[key]))
+open(os.path.join(out, 'space'), 'w').write(built['space'])
+print(built['comment'])
+" "$OPS_DIR")
+        SPACE_ID=$(cat "$OPS_DIR/space")
+        write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json"
+
+        # id ответа — до записи, по той же причине, что у comment: если POST
+        # оборвётся, узнать его будет неоткуда, а слепой повтор задвоит ответ.
+        echo "comment: $COMMENT_ID" >&2
+        if ! transaction "$SPACE_ID" "$(cat "$OPS_DIR/ops.json")" > /dev/null; then
+            echo "Error: исход записи неизвестен (comment: $COMMENT_ID)." >&2
+            echo "       Не повторяйте команду вслепую — сначала посмотрите тред: buildin-pages.sh comments $PAGE_ID" >&2
+            exit 2
+        fi
+        if ! buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"; then
+            echo "Error: транзакция отправлена (comment: $COMMENT_ID), но проверить результат не удалось." >&2
+            echo "       Не повторяйте команду вслепую — сначала посмотрите тред: buildin-pages.sh comments $PAGE_ID" >&2
+            exit 2
+        fi
+        STATUS=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply-verdict -- "$DOC_FILE" "$DISCUSSION" "$COMMENT_ID")
+        case "$STATUS" in
+            unverified)
+                echo "Error: проверочное чтение не вернуло тред $DISCUSSION — исход записи неизвестен." >&2
+                echo "       Ответ: $COMMENT_ID. Не повторяйте команду вслепую — посмотрите тред: buildin-pages.sh comments $PAGE_ID" >&2
+                exit 2
+                ;;
+            not-applied)
+                echo "Error: транзакция не применилась — ответа $COMMENT_ID в треде нет." >&2
+                echo "       Ничего создано не было, повтор безопасен. Файл отката $ROLLBACK_OUT применять не надо." >&2
+                exit 1
+                ;;
+        esac
+        echo "comment: $COMMENT_ID"
         ;;
 
     comment-resolve|comment-unresolve)

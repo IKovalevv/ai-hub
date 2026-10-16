@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bash-слой команд комментариев под /bin/bash: у comment — разбор аргументов,
 # формы ввода, --dry-run, откат, поведение при параллельной записи; у
-# comment-resolve/unresolve — запись, идемпотентность и исходы проверки.
+# comment-reply и comment-resolve/unresolve — запись, отказы до неё и исходы
+# проверки после.
 #
 # Зачем отдельно от bats-юнитов: те бьют по чистому питоновскому билдеру, а
 # ошибки разбора аргументов и склейки живут в shell. Опечатка «--dryrun», молча
@@ -809,6 +810,153 @@ if [ "$RC" -eq 1 ] && stderr | grep -q 'не применилась'; then
     ok "неприменившийся резолв — код 1 и «повтор безопасен»"
 else
     fail "неприменившийся резолв принят за успех (rc=$RC): $(stderr | tail -2)"
+fi
+
+# ---- comment-reply ------------------------------------------------------------
+thread_comments() { python3 -c "
+import json
+print(' '.join(json.load(open('$TMP/state.json'))['data']['discussions']['$THREAD']['comments']))"; }
+message_field() { python3 -c "
+import json
+print(json.dumps(json.load(open('$TMP/state.json'))['data']['comments']['$1']['$2'], ensure_ascii=False))" 2>/dev/null; }
+
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ в тред')
+NEW=$(stdout | sed -n 's/^comment: //p')
+ERR_ID=$(stderr | sed -n 's/^comment: //p' | head -1)
+if [ "$RC" -eq 0 ] && [ -n "$NEW" ] && [ "$NEW" = "$ERR_ID" ] && [ "$(stdout | wc -l | tr -d ' ')" -eq 1 ] \
+   && [ "$(thread_comments)" = "$FIRST $NEW" ] && [ "$(posts)" -eq 1 ]; then
+    ok "comment-reply дописывает ответ в конец треда, id — в stdout и заранее в stderr"
+else
+    fail "comment-reply (rc=$RC, тред=$(thread_comments)): $(stderr | tail -2)"
+fi
+if [ "$(message_field "$NEW" text)" = '[{"text": "ответ в тред", "type": 0, "enhancer": {}}]' ]; then
+    ok "текст ответа лёг одним сегментом"
+else
+    fail "текст ответа: $(message_field "$NEW" text)"
+fi
+
+printf -- '-- не согласен' > "$TMP/reply.txt"
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" "@$TMP/reply.txt")
+NEW=$(stdout | sed -n 's/^comment: //p')
+if [ "$RC" -eq 0 ] && [ "$(message_field "$NEW" text)" = '[{"text": "-- не согласен", "type": 0, "enhancer": {}}]' ]; then
+    ok "текст ответа из @файла доходит, в том числе с ведущими дефисами"
+else
+    fail "ответ из @файла (rc=$RC): $(stderr | tail -2)"
+fi
+
+RB="$TMP/reply-dry-rollback.json"
+printf 'прежний откат' > "$RB"
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' --dry-run "--rollback-out=$RB")
+if [ "$RC" -eq 0 ] && ! sent && [ "$(cat "$RB")" = "прежний откат" ] && stdout | grep -q '"listAfter"'; then
+    ok "ответ с --dry-run печатает операции, ничего не отправляет и не трогает файл отката"
+else
+    fail "ответ с --dry-run (rc=$RC, отправил=$(sent && echo да || echo нет))"
+fi
+
+RB="$TMP/reply-rollback.json"
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' "--rollback-out=$RB")
+NEW=$(stdout | sed -n 's/^comment: //p')
+/bin/bash "$TMP/scripts/buildin.sh" POST /api/records/transactions "$(cat "$RB")" > /dev/null 2>&1
+if [ "$RC" -eq 0 ] && [ "$(thread_comments)" = "$FIRST" ] && [ "$(message_field "$NEW" status)" = "-1" ]; then
+    ok "проигранный откат ответа убирает его из треда и гасит"
+else
+    fail "откат ответа (rc=$RC, тред=$(thread_comments), status=$(message_field "$NEW" status))"
+fi
+
+write_thread_fixture true
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'comment-unresolve'; then
+    ok "ответ в закрытый тред отвергнут с подсказкой открыть его"
+else
+    fail "ответ в закрытый тред не отвергнут (rc=$RC): $(stderr | head -2)"
+fi
+
+write_fixture
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'на странице нет'; then
+    ok "ответ в тред не с этой страницы — отказ без записи"
+else
+    fail "ответ в отсутствующий тред не отвергнут (rc=$RC)"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" "@$TMP/empty.txt")
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'текст ответа пустой'; then
+    ok "пустой файл как текст ответа отвергнут"
+else
+    fail "пустой текст ответа не отвергнут (rc=$RC)"
+fi
+
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' --occurrence=2)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --occurrence=2'; then
+    ok "флаг, которого у ответа нет, отвергнут"
+else
+    fail "ответ принял --occurrence (rc=$RC)"
+fi
+
+RC=$(run_sub comment-reply "$PAGE" "не-uuid" 'ответ')
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'не UUID'; then
+    ok "кривой id треда в ответе отвергнут"
+else
+    fail "кривой id треда в ответе не отвергнут (rc=$RC)"
+fi
+
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' 'лишний')
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'ожидались ровно <discussion_id> и <text>'; then
+    ok "лишний позиционный аргумент ответа отвергнут"
+else
+    fail "лишний аргумент ответа не отвергнут (rc=$RC)"
+fi
+
+RC=$(run_sub comment-reply)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'Usage: comment-reply'; then
+    ok "comment-reply без аргументов печатает справку"
+else
+    fail "comment-reply без аргументов (rc=$RC): $(stderr | head -1)"
+fi
+
+write_thread_fixture false
+export STUB_FAIL_POST=1
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+unset STUB_FAIL_POST
+if [ "$RC" -eq 2 ] && stderr | grep -q 'исход записи неизвестен (comment: ' && stderr | grep -q 'вслепую'; then
+    ok "сбой POST при ответе называет id ответа и запрещает слепой повтор"
+else
+    fail "сбой POST при ответе (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+export STUB_FAIL_GET_AFTER_WRITE=1
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+unset STUB_FAIL_GET_AFTER_WRITE
+if [ "$RC" -eq 2 ] && stderr | grep -q 'проверить результат не удалось'; then
+    ok "сбой проверочного чтения при ответе — код 2"
+else
+    fail "сбой проверочного чтения при ответе (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+export STUB_INBAND_ERROR=1
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+unset STUB_INBAND_ERROR
+if [ "$RC" -eq 2 ] && stderr | grep -q 'не вернуло тред'; then
+    ok "конверт ошибки на проверке ответа — код 2"
+else
+    fail "конверт ошибки на проверке ответа (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+export STUB_IGNORE_WRITES=1
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+unset STUB_IGNORE_WRITES
+if [ "$RC" -eq 1 ] && stderr | grep -q 'не применилась' && stderr | grep -q 'повтор безопасен'; then
+    ok "неприменившийся ответ — код 1 и «повтор безопасен»"
+else
+    fail "неприменившийся ответ принят за успех (rc=$RC): $(stderr | tail -2)"
 fi
 
 echo "---"
