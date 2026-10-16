@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# bash-слой команды `comment` под /bin/bash: разбор аргументов, формы ввода,
-# --dry-run, откат, поведение при параллельной записи.
+# bash-слой команд комментариев под /bin/bash: у comment — разбор аргументов,
+# формы ввода, --dry-run, откат, поведение при параллельной записи; у
+# comment-resolve/unresolve — запись, идемпотентность и исходы проверки.
 #
 # Зачем отдельно от bats-юнитов: те бьют по чистому питоновскому билдеру, а
 # ошибки разбора аргументов и склейки живут в shell. Опечатка «--dryrun», молча
@@ -76,15 +77,34 @@ if before_uuid:
     block.setdefault("discussions", []).append(before_uuid)
 
 if not os.environ.get("STUB_IGNORE_WRITES"):
+    # Треды и сообщения применяются тоже: без них проверку после записи у
+    # команд резолва и ответа нечем ни подтвердить, ни опровергнуть.
+    threads = state["data"].setdefault("discussions", {})
+    messages = state["data"].setdefault("comments", {})
     for op in ops:
-        if op.get("table") != "block" or op["id"] != block_id:
-            continue
-        if op["command"] == "update" and op.get("path") == ["data"]:
-            block["data"].update(op["args"])
-        elif op["command"] == "listAfter" and op.get("path") == ["discussions"]:
-            block.setdefault("discussions", []).append(op["args"]["uuid"])
-        elif op["command"] == "listRemove" and op.get("path") == ["discussions"]:
-            block["discussions"] = [d for d in block.get("discussions", []) if d != op["args"]["uuid"]]
+        table, command, path = op.get("table"), op["command"], op.get("path")
+        if table == "block" and op["id"] == block_id:
+            if command == "update" and path == ["data"]:
+                block["data"].update(op["args"])
+            elif command == "listAfter" and path == ["discussions"]:
+                block.setdefault("discussions", []).append(op["args"]["uuid"])
+            elif command == "listRemove" and path == ["discussions"]:
+                block["discussions"] = [d for d in block.get("discussions", []) if d != op["args"]["uuid"]]
+        elif table == "discussion":
+            if command == "set":
+                threads[op["id"]] = dict(op["args"])
+            elif command == "update" and path == []:
+                threads.setdefault(op["id"], {}).update(op["args"])
+            elif command == "listAfter" and path == ["comments"]:
+                threads.setdefault(op["id"], {}).setdefault("comments", []).append(op["args"]["uuid"])
+            elif command == "listRemove" and path == ["comments"]:
+                thread = threads.setdefault(op["id"], {})
+                thread["comments"] = [c for c in thread.get("comments", []) if c != op["args"]["uuid"]]
+        elif table == "comment":
+            if command == "set":
+                messages[op["id"]] = dict(op["args"])
+            elif command == "update" and path == []:
+                messages.setdefault(op["id"], {}).update(op["args"])
 
 # Чужая запись ПОСЛЕ нашей, построенная из ДОнашего снапшота: затирает нашу
 # подсветку — так проигрывают гонку.
@@ -639,6 +659,156 @@ if [ "$RC" -eq 0 ] && stdout | grep -q "$BLOCK" && ! stdout | grep -q "$SPACE"; 
     ok "comments принимает <url>#<block_uuid> и не путает space с page"
 else
     fail "comments сломан на якоре в URL (rc=$RC): $(stdout | head -2)"
+fi
+
+# ---- comment-resolve / comment-unresolve -------------------------------------
+THREAD=66666666-6666-4666-8666-666666666666
+FIRST=77777777-7777-4777-8777-777777777777
+
+# Состояние с тредом на блоке: $1 — resolved (true|false).
+write_thread_fixture() {
+    cat > "$TMP/state.json" <<DOC
+{"code":200,"data":{"blocks":{"$BLOCK":{
+  "uuid":"$BLOCK","spaceId":"$SPACE","type":1,"discussions":["$THREAD"],
+  "data":{"pageFixedWidth":true,
+    "segments":[
+      {"text":"безлимитный тариф","type":0,"enhancer":{},"discussions":["$THREAD"]},
+      {"text":": лимит 100 запросов в минуту","type":0,"enhancer":{}}]}}},
+  "discussions":{"$THREAD":{"uuid":"$THREAD","spaceId":"$SPACE","parentId":"$BLOCK",
+    "status":1,"resolved":${1:-false},"comments":["$FIRST"]}},
+  "comments":{"$FIRST":{"uuid":"$FIRST","spaceId":"$SPACE","parentId":"$THREAD",
+    "status":1,"text":[{"text":"первое","type":0,"enhancer":{}}]}}}}
+DOC
+}
+
+run_sub() { # подкоманда с чистыми журналами стаба; состояние готовит вызывающий
+    rm -f "$TMP/log/tx-body.json" "$TMP/log/tx-all.json" \
+          "$TMP/log/getn" "$TMP/log/postn" "$TMP/log/calls.txt"
+    /bin/bash "$TMP/scripts/buildin-pages.sh" "$@" > "$TMP/log/stdout.txt" 2> "$TMP/log/stderr.txt"
+    echo $?
+}
+thread_field() { python3 -c "
+import json
+print(json.dumps(json.load(open('$TMP/state.json'))['data']['discussions']['$THREAD']['$1']))"; }
+posts() { cat "$TMP/log/postn" 2>/dev/null || echo 0; }
+
+write_thread_fixture false
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+if [ "$RC" -eq 0 ] && [ "$(thread_field resolved)" = "true" ] && [ "$(stdout)" = "discussion: $THREAD" ] && [ "$(posts)" -eq 1 ]; then
+    ok "comment-resolve закрывает тред и печатает его id в stdout"
+else
+    fail "comment-resolve не закрыл тред (rc=$RC, resolved=$(thread_field resolved)): $(stderr | head -2)"
+fi
+
+write_thread_fixture true
+RC=$(run_sub comment-unresolve "https://buildin.ai/$SPACE/$PAGE" "$THREAD")
+if [ "$RC" -eq 0 ] && [ "$(thread_field resolved)" = "false" ]; then
+    ok "comment-unresolve открывает тред, страница — и формой URL"
+else
+    fail "comment-unresolve не открыл тред (rc=$RC): $(stderr | head -2)"
+fi
+
+write_thread_fixture true
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+if [ "$RC" -eq 0 ] && ! sent && stderr | grep -q 'уже закрыт' && [ "$(stdout)" = "discussion: $THREAD" ]; then
+    ok "уже закрытый тред — без записи, выход 0"
+else
+    fail "повторный резолв что-то записал или упал (rc=$RC, POST-ов=$(posts))"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD" --dry-run)
+if [ "$RC" -eq 0 ] && ! sent && stdout | grep -q '"resolved": true'; then
+    ok "резолв с --dry-run печатает операцию и ничего не отправляет"
+else
+    fail "резолв с --dry-run (rc=$RC, отправил=$(sent && echo да || echo нет)): $(stdout | head -3)"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD" "--rollback-out=$TMP/rb-resolve.json")
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --rollback-out'; then
+    ok "флаг, которого у резолва нет, отвергнут, а не принят молча"
+else
+    fail "резолв принял --rollback-out (rc=$RC)"
+fi
+
+# Разрешённый флаг в чужой форме не должен стать позиционным аргументом.
+write_thread_fixture false
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD" --dry-run=yes)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --dry-run=yes'; then
+    ok "--dry-run=yes отвергнут, а не принят за позиционный аргумент"
+else
+    fail "--dry-run=yes не отвергнут как флаг (rc=$RC): $(stderr | head -1)"
+fi
+
+RC=$(run_sub comment-resolve "$PAGE" "не-uuid")
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'не UUID'; then
+    ok "id треда не в форме UUID отвергнут"
+else
+    fail "кривой id треда не отвергнут (rc=$RC)"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD" лишний)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'ожидался ровно <discussion_id>'; then
+    ok "лишний позиционный аргумент резолва отвергнут"
+else
+    fail "лишний аргумент резолва не отвергнут (rc=$RC)"
+fi
+
+RC=$(run_sub comment-resolve)
+if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'Usage: comment-resolve'; then
+    ok "comment-resolve без аргументов печатает справку"
+else
+    fail "comment-resolve без аргументов (rc=$RC): $(stderr | head -1)"
+fi
+
+write_fixture
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'на странице нет'; then
+    ok "тред не с этой страницы — отказ без записи"
+else
+    fail "отсутствующий тред не отвергнут (rc=$RC): $(stderr | head -2)"
+fi
+
+write_thread_fixture false
+export STUB_FAIL_POST=1
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+unset STUB_FAIL_POST
+if [ "$RC" -eq 2 ] && stderr | grep -q 'исход записи неизвестен' && stderr | grep -q 'Повтор безопасен'; then
+    ok "сбой POST при резолве — код 2 и честное «повтор безопасен»"
+else
+    fail "сбой POST при резолве обработан не так (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+export STUB_FAIL_GET_AFTER_WRITE=1
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+unset STUB_FAIL_GET_AFTER_WRITE
+if [ "$RC" -eq 2 ] && stderr | grep -q 'проверить результат не удалось'; then
+    ok "сбой проверочного чтения при резолве — код 2"
+else
+    fail "сбой проверочного чтения при резолве (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+export STUB_INBAND_ERROR=1
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+unset STUB_INBAND_ERROR
+if [ "$RC" -eq 2 ] && stderr | grep -q 'не вернуло тред'; then
+    ok "конверт ошибки на проверке резолва — код 2"
+else
+    fail "конверт ошибки на проверке резолва (rc=$RC): $(stderr | tail -2)"
+fi
+
+write_thread_fixture false
+export STUB_IGNORE_WRITES=1
+RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
+unset STUB_IGNORE_WRITES
+if [ "$RC" -eq 1 ] && stderr | grep -q 'не применилась'; then
+    ok "неприменившийся резолв — код 1 и «повтор безопасен»"
+else
+    fail "неприменившийся резолв принят за успех (rc=$RC): $(stderr | tail -2)"
 fi
 
 echo "---"

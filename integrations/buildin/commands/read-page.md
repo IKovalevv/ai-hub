@@ -85,7 +85,8 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comments "<page_id|url>"
 
 URL с якорем (`https://buildin.ai/<page>#<block>`) фильтрует по конкретному блоку —
 передавай его как есть. Пустой текст комментария из одних `@Имя` — это пинг людей
-без реплики, так и объясняй.
+без реплики, так и объясняй. Закрыть тред или открыть его заново — команды
+`comment-resolve` / `comment-unresolve` (см. `/ai-hub:buildin-publish`).
 
 ### Фаза 3: Обновить shadow-индекс
 

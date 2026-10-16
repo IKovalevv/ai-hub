@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# Unit tests for buildin-comment.py — block- and segment-type guards, anchor lookup, resplit checks.
+# Unit tests for buildin-comment.py — block- and segment-type guards, anchor lookup, resplit checks,
+# thread operations.
 #
 # Поиск якоря и перенарезка сегментов — место, где ошибка тихая: тред
 # привяжется не к той фразе или незаметно испортит блок. Поэтому здесь чистая
@@ -624,4 +625,79 @@ verdict() { python3 "$OPS_PY" --verdict -- "$1" "$2" "$BLOCK" "ours"; }
     mkstate '["theirs","ours"]' '["ours"]' > "$BATS_TEST_TMPDIR/a.json"
     result=$(verdict "$BATS_TEST_TMPDIR/b.json" "$BATS_TEST_TMPDIR/a.json" | tr '\n' '|')
     [ "$result" = "ok||" ]
+}
+
+# ---- резолв треда -----------------------------------------------------------
+
+THREAD=66666666-6666-4666-8666-666666666666
+
+# Документ с тредом: $1 — resolved (true|false), $2 — status треда (по умолчанию 1).
+mkthread() {
+    python3 - "$THREAD" "$SPACE" "$BLOCK" "$1" "${2:-1}" > "$DOC" <<'PY'
+import json, sys
+thread, space, block, resolved, status = sys.argv[1:6]
+print(json.dumps({"data": {"discussions": {thread: {
+    "uuid": thread, "spaceId": space, "parentId": block, "status": int(status),
+    "resolved": resolved == "true", "comments": ["77777777-7777-4777-8777-777777777777"]}}}}))
+PY
+}
+
+resolve() { python3 "$OPS_PY" --resolve="$1" -- "$DOC" "$THREAD" 2>/dev/null; }
+resolve_stderr() { python3 "$OPS_PY" --resolve="$1" -- "$DOC" "$THREAD" 2>&1 >/dev/null; }
+resolve_ops() { resolve "$1" | python3 -c "import json, sys; print(json.load(sys.stdin)['ops'])"; }
+
+@test "resolve is one narrow write of the resolved flag, exactly as the UI sends it" {
+    mkthread false
+    result=$(resolve true | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+print(r['ops'] == [{'id': '$THREAD', 'command': 'update', 'table': 'discussion',
+                    'path': [], 'args': {'resolved': True}}], r['space'] == '$SPACE')")
+    [ "$result" = "True True" ]
+}
+
+@test "unresolve writes the flag back to false" {
+    mkthread true
+    [ "$(resolve_ops false)" = "[{'id': '$THREAD', 'command': 'update', 'table': 'discussion', 'path': [], 'args': {'resolved': False}}]" ]
+}
+
+@test "a thread already in the target state gets no write" {
+    mkthread true
+    [ "$(resolve_ops true)" = "[]" ]
+    mkthread false
+    [ "$(resolve_ops false)" = "[]" ]
+}
+
+@test "thread missing from the page is refused with a hint about comments" {
+    mkdoc '[{"text": "alpha", "type": 0, "enhancer": {}}]'
+    err=$(resolve_stderr true) || true
+    [[ "$err" == *"Треда $THREAD на странице нет"* ]]
+    [[ "$err" == *"buildin-pages.sh comments"* ]]
+}
+
+@test "deleted thread is refused" {
+    mkthread false -1
+    err=$(resolve_stderr true) || true
+    [[ "$err" == *"Тред $THREAD удалён"* ]]
+}
+
+@test "resolve flag value other than true or false is rejected" {
+    mkthread false
+    err=$(python3 "$OPS_PY" --resolve=yes -- "$DOC" "$THREAD" 2>&1 >/dev/null) || true
+    [[ "$err" == *"--resolve ожидает true или false"* ]]
+}
+
+resolve_verdict() { python3 "$OPS_PY" --resolve-verdict="$2" -- "$1" "$THREAD"; }
+
+@test "resolve verdict: flag in place is ok, unchanged flag is not-applied" {
+    mkthread true
+    [ "$(resolve_verdict "$DOC" true)" = "ok" ]
+    [ "$(resolve_verdict "$DOC" false)" = "not-applied" ]
+}
+
+@test "resolve verdict: error envelope or missing thread is unverified" {
+    printf '{"code":500,"msg":"no rights"}' > "$BATS_TEST_TMPDIR/a.json"
+    [ "$(resolve_verdict "$BATS_TEST_TMPDIR/a.json" true)" = "unverified" ]
+    mkdoc '[{"text": "alpha", "type": 0, "enhancer": {}}]'
+    [ "$(resolve_verdict "$DOC" true)" = "unverified" ]
 }

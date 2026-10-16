@@ -29,6 +29,10 @@
 #                                                  подсветки не будет, поэтому отказ
 #                                                  дату и инлайн-формулу внутри блока — только
 #                                                  целиком: разрез формулу ломает
+#   comment-resolve <page_id|url> <discussion_id> [--dry-run]
+#                                                — закрыть тред (резолв); уже закрытый — без записи
+#   comment-unresolve <page_id|url> <discussion_id> [--dry-run]
+#                                                — открыть закрытый тред заново
 #   publish-md <page_id> <file.md> [--replace]          — опубликовать markdown-файл
 #                                                        (по умолчанию дописывает в конец;
 #                                                         --replace заменяет содержимое)
@@ -106,6 +110,46 @@ parse_page_and_block_id() {
     if [[ -z "$BLOCK_ID" && "$input" == *"#"* ]]; then
         BLOCK_ID=$(echo "${input#*#}" | grep -oE "$UUID_RE" | head -1 || true)
     fi
+}
+
+# Флаги команд комментариев — один разбор на comment и comment-resolve/
+# unresolve: копии цикла разошлись бы молча. $1 — разрешённые флаги через
+# пробел, дальше аргументы команды. Выставляет DRY_RUN, ROLLBACK_OUT,
+# OCCURRENCE и массив ARGS с позиционными.
+#
+# Неизвестные «--»-токены отвергаются, а не сваливаются в позиционные: иначе
+# опечатка «--dryrun» молча делает боевую запись вместо превью. Флаг, который
+# команде не положен, отвергается так же: у резолва нет файла отката, и
+# молча принятый --rollback-out обещал бы то, чего нет.
+parse_comment_flags() {
+    local allowed=" $1 " flag
+    shift
+    DRY_RUN=""
+    ROLLBACK_OUT=""
+    OCCURRENCE=""
+    ARGS=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == --?* ]]; then
+            flag="${1%%=*}"
+            [[ "$allowed" == *" ${flag#--} "* ]] || {
+                echo "Error: неизвестный флаг: $1" >&2; echo "$USAGE" >&2; exit 1; }
+        fi
+        case "$1" in
+            --dry-run)         DRY_RUN=1 ;;
+            --occurrence=*)    OCCURRENCE="${1#*=}" ;;
+            --occurrence)      shift; OCCURRENCE="${1:-}"
+                               [[ -n "$OCCURRENCE" && "$OCCURRENCE" != --* ]] || {
+                                   echo "Error: --occurrence без значения" >&2; exit 1; } ;;
+            --rollback-out=*)  ROLLBACK_OUT="${1#*=}" ;;
+            --rollback-out)    shift; ROLLBACK_OUT="${1:-}"
+                               [[ -n "$ROLLBACK_OUT" && "$ROLLBACK_OUT" != --* ]] || {
+                                   echo "Error: --rollback-out без значения" >&2; exit 1; } ;;
+            --)                shift; while [[ $# -gt 0 ]]; do ARGS+=("$1"); shift; done; break ;;
+            --*)               echo "Error: неизвестный флаг: $1" >&2; echo "$USAGE" >&2; exit 1 ;;
+            *)                 ARGS+=("$1") ;;
+        esac
+        shift || true
+    done
 }
 
 # Получить spaceId для страницы
@@ -477,30 +521,7 @@ if not found:
         INPUT="$1"
         [[ -z "$INPUT" ]] && { echo "$USAGE" >&2; exit 1; }
         shift
-
-        # Неизвестные «--»-токены отвергаем, а не сваливаем в позиционные: иначе
-        # опечатка «--dryrun» молча делает боевую запись вместо превью.
-        DRY_RUN=""
-        ROLLBACK_OUT=""
-        OCCURRENCE=""
-        ARGS=()
-        while [[ $# -gt 0 ]]; do
-            case "$1" in
-                --dry-run)         DRY_RUN=1 ;;
-                --occurrence=*)    OCCURRENCE="${1#*=}" ;;
-                --occurrence)      shift; OCCURRENCE="${1:-}"
-                                   [[ -n "$OCCURRENCE" && "$OCCURRENCE" != --* ]] || {
-                                       echo "Error: --occurrence без значения" >&2; exit 1; } ;;
-                --rollback-out=*)  ROLLBACK_OUT="${1#*=}" ;;
-                --rollback-out)    shift; ROLLBACK_OUT="${1:-}"
-                                   [[ -n "$ROLLBACK_OUT" && "$ROLLBACK_OUT" != --* ]] || {
-                                       echo "Error: --rollback-out без значения" >&2; exit 1; } ;;
-                --)                shift; while [[ $# -gt 0 ]]; do ARGS+=("$1"); shift; done; break ;;
-                --*)               echo "Error: неизвестный флаг: $1" >&2; echo "$USAGE" >&2; exit 1 ;;
-                *)                 ARGS+=("$1") ;;
-            esac
-            shift || true
-        done
+        parse_comment_flags "dry-run occurrence rollback-out" "$@"
 
         parse_page_and_block_id "$INPUT"
         # Первый позиционный считаем блоком, только если он целиком UUID: якорь
@@ -672,6 +693,71 @@ print(built['discussion'])
             echo "          Иначе вернуть подсветку можно только новым комментарием: сама" >&2
             echo "          команда не угадывает, к какой фразе чужой тред был привязан." >&2
         fi
+        ;;
+
+    comment-resolve|comment-unresolve)
+        USAGE="Usage: $COMMAND <page_id|url> <discussion_id> [--dry-run]
+  <discussion_id>: строка «Тред <uuid>» в выводе comments; страница — та, где висит тред
+  тред уже в нужном состоянии — записи нет, выход 0"
+        INPUT="$1"
+        [[ -z "$INPUT" ]] && { echo "$USAGE" >&2; exit 1; }
+        shift
+        parse_comment_flags "dry-run" "$@"
+
+        parse_page_and_block_id "$INPUT"
+        [[ ${#ARGS[@]} -eq 1 ]] || { echo "Error: ожидался ровно <discussion_id>, получено: ${#ARGS[@]}" >&2; echo "$USAGE" >&2; exit 1; }
+        DISCUSSION="${ARGS[0]}"
+        [[ "$DISCUSSION" =~ ^$UUID_RE$ ]] || { echo "Error: <discussion_id> — не UUID: $DISCUSSION" >&2; echo "$USAGE" >&2; exit 1; }
+        if [[ "$COMMAND" == comment-resolve ]]; then
+            TARGET=true; STATE="закрыт"
+        else
+            TARGET=false; STATE="открыт"
+        fi
+
+        DOC_FILE=$(mktemp)
+        trap 'rm -f "$DOC_FILE"' EXIT
+
+        buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"
+        BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --resolve="$TARGET" -- "$DOC_FILE" "$DISCUSSION")
+        OPS=$(echo "$BUILT" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['ops']))")
+        SPACE_ID=$(echo "$BUILT" | python3 -c "import json, sys; print(json.load(sys.stdin)['space'])")
+
+        if [[ "$OPS" == "[]" ]]; then
+            echo "Тред $DISCUSSION уже $STATE — записи не было." >&2
+            echo "discussion: $DISCUSSION"
+            exit 0
+        fi
+        if [[ -n "$DRY_RUN" ]]; then
+            echo "$OPS" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin), indent=2))"
+            exit 0
+        fi
+
+        # Резолв идемпотентен, поэтому при неизвестном исходе повтор безопасен —
+        # в отличие от comment, где слепой повтор повесил бы второй тред.
+        if ! transaction "$SPACE_ID" "$OPS" > /dev/null; then
+            echo "Error: исход записи неизвестен (discussion: $DISCUSSION)." >&2
+            echo "       Повтор безопасен: команда сама увидит, если тред уже $STATE." >&2
+            exit 2
+        fi
+        if ! buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"; then
+            echo "Error: транзакция отправлена (discussion: $DISCUSSION), но проверить результат не удалось." >&2
+            echo "       Повтор безопасен: команда сама увидит, если тред уже $STATE." >&2
+            exit 2
+        fi
+        STATUS=$(python3 "$SCRIPT_DIR/buildin-comment.py" --resolve-verdict="$TARGET" -- "$DOC_FILE" "$DISCUSSION")
+        case "$STATUS" in
+            unverified)
+                echo "Error: проверочное чтение не вернуло тред $DISCUSSION — исход записи неизвестен." >&2
+                echo "       Повтор безопасен: команда сама увидит, если тред уже $STATE." >&2
+                exit 2
+                ;;
+            not-applied)
+                echo "Error: транзакция не применилась — тред $DISCUSSION не $STATE. Повтор безопасен." >&2
+                exit 1
+                ;;
+        esac
+        echo "Тред $DISCUSSION $STATE." >&2
+        echo "discussion: $DISCUSSION"
         ;;
 
     read)

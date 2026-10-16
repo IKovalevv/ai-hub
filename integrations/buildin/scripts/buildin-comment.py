@@ -37,9 +37,15 @@
 проверен живьём: x^{2} по «{2» превратилась в три формулы, и Buildin рисует
 все три ошибкой разбора. Такие объекты комментируются только целиком.
 
+Резолв треда (и его отмена) — одна узкая запись поля resolved: ровно это шлёт
+UI, сегменты и список тредов блока он не трогает.
+
 Usage:
     buildin-comment.py [--occurrence=N] -- <doc_json> <block_id> <anchor> <text>
                        <now_ms> <user_id>
+    buildin-comment.py --verdict -- <before_json> <after_json> <block_id> <discussion_id>
+    buildin-comment.py --resolve=true|false -- <doc_json> <discussion_id>
+    buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
 
 <doc_json> — файл с ответом /api/docs (или «-» для stdin).
 --occurrence N — какое вхождение якоря выделить (1-based), когда их несколько.
@@ -52,6 +58,10 @@ import uuid
 
 class AnchorError(Exception):
     """Якорь не удалось выделить — сообщение уже человекочитаемое."""
+
+
+class ThreadError(Exception):
+    """Тред не годится для операции — сообщение уже человекочитаемое."""
 
 
 # Типы блоков Buildin — та же карта, что в комментарии кейса read) файла
@@ -544,34 +554,97 @@ def verdict(before, after, block_id, ours):
     return "lost-ours", []
 
 
+def find_thread(doc, discussion_id):
+    """Тред из ответа /api/docs, либо None, если его там нет."""
+    return ((doc.get("data") or {}).get("discussions") or {}).get(discussion_id)
+
+
+def live_thread(doc, discussion_id):
+    """Тред, с которым можно работать: он есть на странице и не удалён.
+
+    Читать тред по id API не умеет — /api/discussions/<id> и соседние адреса
+    отвечают 404, — поэтому тред ищется в ответе /api/docs страницы. Отсюда и
+    страница в аргументах команд, работающих с тредом.
+    """
+    thread = find_thread(doc, discussion_id)
+    if thread is None:
+        raise ThreadError(
+            "Треда %s на странице нет.\n"
+            "Id треда — строка «Тред <uuid>» в выводе `buildin-pages.sh comments`, "
+            "а страница нужна та, где висит тред." % discussion_id
+        )
+    if thread.get("status") == -1:
+        raise ThreadError("Тред %s удалён." % discussion_id)
+    return thread
+
+
+def build_resolve_ops(thread, discussion_id, resolved):
+    """Операция резолва треда или его отмены; пустой список — тред уже в нужном состоянии.
+
+    Ровно то, что шлёт UI (снято с живой страницы): одна узкая запись поля
+    resolved, даже без updatedAt. Сегменты и список тредов блока резолв не
+    трогает — подсветку закрытого треда Buildin просто не рисует.
+
+    Повторная запись того же значения не нужна никому, а version треда она
+    всё равно подняла бы, поэтому вместо операции пустой список.
+    """
+    if bool(thread.get("resolved")) == resolved:
+        return []
+    return [{"id": discussion_id, "command": "update", "table": "discussion", "path": [],
+             "args": {"resolved": resolved}}]
+
+
+def resolve_verdict(after, discussion_id, resolved):
+    """Исход резолва по снимку после записи.
+
+      unverified  — треда нет в ответе: конверт ошибки или чужая страница;
+      not-applied — тред на месте, а флаг прежний: запись не легла;
+      ok          — флаг стоит.
+    """
+    thread = find_thread(after, discussion_id)
+    if thread is None:
+        return "unverified"
+    return "ok" if bool(thread.get("resolved")) == resolved else "not-applied"
+
+
+# Режимы билдера: режим → число позиционных аргументов после «--».
+ARITY = {
+    "build": 6,            # <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
+    "verdict": 4,          # <before_json> <after_json> <block_id> <discussion_id>
+    "resolve": 2,          # <doc_json> <discussion_id>
+    "resolve-verdict": 2,  # <after_json> <discussion_id>
+}
+
+
 def parse_args(argv):
-    positional, occurrence, end_of_opts, as_verdict = [], None, False, False
+    """(режим, позиционные, опции); ошибка разбора — SystemExit с причиной."""
+    positional, end_of_opts, mode = [], False, "build"
+    opts = {"occurrence": None, "resolved": None}
     for a in argv:
         if end_of_opts or not a.startswith("--"):
             positional.append(a)
-        elif a == "--verdict":
-            as_verdict = True
         elif a == "--":
             # Всё после «--» — значения. Без этого якорь или текст с ведущими
             # дефисами («--force», «-- не согласен») не доходит до билдера
             # никакой формой ввода: они едут через argv, в том числе из @file.
             end_of_opts = True
+        elif a == "--verdict":
+            mode = "verdict"
+        elif a.split("=", 1)[0] in ("--resolve", "--resolve-verdict"):
+            flag, _, raw = a.partition("=")
+            if raw not in ("true", "false"):
+                raise SystemExit("Error: %s ожидает true или false, получено: %r" % (flag, raw))
+            mode, opts["resolved"] = flag[2:], raw == "true"
         elif a.startswith("--occurrence="):
             raw = a.split("=", 1)[1]
             if not raw.isdigit() or int(raw) < 1:
                 raise SystemExit("Error: --occurrence ожидает целое число >= 1, получено: %r" % raw)
-            occurrence = int(raw)
+            opts["occurrence"] = int(raw)
         else:
             raise SystemExit("Error: неизвестный флаг: %s" % a)
-    if as_verdict:
-        if len(positional) != 4:
-            raise SystemExit("Usage: buildin-comment.py --verdict -- <before_json> <after_json> "
-                             "<block_id> <discussion_id>")
-        return ("verdict",) + tuple(positional)
-    if len(positional) != 6:
+    if len(positional) != ARITY[mode]:
         raise SystemExit(__doc__.strip())
-    doc_json, block_id, anchor, text, now, user_id = positional
-    return ("build", doc_json, block_id, anchor, text, int(now), user_id, occurrence)
+    return mode, positional, opts
 
 
 def load_doc(path):
@@ -582,32 +655,40 @@ def load_doc(path):
         return {}
 
 
-def main():
-    parsed = parse_args(sys.argv[1:])
-    if parsed[0] == "verdict":
-        _, before_path, after_path, block_id, ours = parsed
-        status, lost = verdict(load_doc(before_path), load_doc(after_path), block_id, ours)
-        print(status)
-        print(" ".join(lost))
-        return
-
-    _, doc_json, block_id, anchor, text, now, user_id, occurrence = parsed
-
+def build_comment(args, opts):
+    """Режим по умолчанию: операции нового треда на фразе блока."""
+    doc_json, block_id, anchor, text, now, user_id = args
     block = read_block(load_doc(doc_json), block_id)
     if block is None:
         raise SystemExit(
             "Error: блок %s не найден на странице. "
             "Идентификаторы блоков — поле uuid в выводе `buildin-pages.sh get-blocks`." % block_id
         )
+    return build_ops(block, block_id, anchor, text, int(now), user_id, opts["occurrence"])
 
+
+def main():
+    mode, args, opts = parse_args(sys.argv[1:])
     try:
-        result = build_ops(block, block_id, anchor, text, now, user_id, occurrence)
-    except AnchorError as e:
+        if mode == "verdict":
+            before_path, after_path, block_id, ours = args
+            status, lost = verdict(load_doc(before_path), load_doc(after_path), block_id, ours)
+            print(status)
+            print(" ".join(lost))
+        elif mode == "resolve":
+            doc_json, discussion_id = args
+            thread = live_thread(load_doc(doc_json), discussion_id)
+            ops = build_resolve_ops(thread, discussion_id, opts["resolved"])
+            print(json.dumps({"ops": ops, "space": thread.get("spaceId", "")}))
+        elif mode == "resolve-verdict":
+            after_path, discussion_id = args
+            print(resolve_verdict(load_doc(after_path), discussion_id, opts["resolved"]))
+        else:
+            # Без ensure_ascii=False: вывод разбирает json.load, ему \uXXXX всё
+            # равно, а печать не-ASCII падает под не-UTF-8 локалью (LC_ALL=C).
+            print(json.dumps(build_comment(args, opts)))
+    except (AnchorError, ThreadError) as e:
         raise SystemExit("Error: %s" % e)
-
-    # Без ensure_ascii=False: вывод разбирает json.load, ему \uXXXX всё равно,
-    # а печать не-ASCII падает под не-UTF-8 локалью (LC_ALL=C).
-    print(json.dumps(result))
 
 
 if __name__ == "__main__":

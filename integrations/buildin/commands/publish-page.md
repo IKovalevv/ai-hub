@@ -299,6 +299,17 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" insert-blocks-before "<page_id>" "<bloc
    bash "$BUILDIN_SCRIPTS/buildin.sh" POST /api/records/transactions "$(cat <путь>)"
    ```
 
+   **Резолв треда** — закрыть обсуждение или открыть его заново. Id треда —
+   строка `Тред <uuid>` в выводе `comments`:
+
+   ```bash
+   bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-resolve "<page_id>" "<discussion_uuid>"
+   bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-unresolve "<page_id>" "<discussion_uuid>"
+   ```
+
+   Тред, уже стоящий в нужном состоянии, команда не трогает и выходит с `0`.
+   Код `2` значит, что исход неизвестен, но повтор безопасен: резолв идемпотентен.
+
 4. **Проверь результат** — перечитай страницу и убедись, что блоки встали в нужном порядке:
 
    ```bash
