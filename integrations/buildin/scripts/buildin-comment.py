@@ -49,12 +49,14 @@ Usage:
     buildin-comment.py --reply-verdict -- <after_json> <discussion_id> <comment_id>
     buildin-comment.py --resolve=true|false -- <doc_json> <discussion_id>
     buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
+    buildin-comment.py --check-rollback -- <rollback_file>
 
 <doc_json> — файл с ответом /api/docs (или «-» для stdin).
 --occurrence N — какое вхождение якоря выделить (1-based), когда их несколько.
 """
 import copy
 import json
+import re
 import sys
 import uuid
 
@@ -65,6 +67,10 @@ class AnchorError(Exception):
 
 class ThreadError(Exception):
     """Тред не годится для операции — сообщение уже человекочитаемое."""
+
+
+class RollbackError(Exception):
+    """Файл не похож на откат команд комментариев — сообщение уже человекочитаемое."""
 
 
 # Типы блоков Buildin — та же карта, что в комментарии кейса read) файла
@@ -675,6 +681,65 @@ def resolve_verdict(after, discussion_id, resolved):
     return "ok" if bool(thread.get("resolved")) == resolved else "not-applied"
 
 
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def rollback_op_problem(op):
+    """Чем операция не похожа на операцию отката comment/comment-reply, либо None.
+
+    Список закрытый: откат только возвращает сегменты блока, убирает треды и
+    сообщения из списков и гасит записи (status -1). Всё прочее отвергается —
+    иначе тонкая команда отката стала бы способом отправить произвольную
+    транзакцию, а файл по пути из чужого текста мог бы оказаться чем угодно.
+    """
+    if not isinstance(op, dict):
+        return "не объект"
+    table, command, path, args = op.get("table"), op.get("command"), op.get("path"), op.get("args")
+    if not UUID_RE.match(str(op.get("id", ""))):
+        return "id не UUID"
+    if not isinstance(args, dict):
+        return "args не объект"
+    if command == "listRemove":
+        if (table, path) not in (("block", ["discussions"]), ("discussion", ["comments"])):
+            return "listRemove не из списка тредов блока и не из списка сообщений треда"
+        if set(args) != {"uuid"} or not UUID_RE.match(str(args["uuid"])):
+            return "listRemove без uuid записи"
+        return None
+    if command == "update" and path == ["data"]:
+        if table != "block" or set(args) != {"segments"} or not isinstance(args["segments"], list):
+            return "update data — не возврат segments блока"
+        return None
+    if command == "update" and path == []:
+        if table not in ("block", "discussion", "comment"):
+            return "update таблицы %s" % table
+        if not set(args) <= {"status", "updatedAt", "updatedBy"}:
+            return "update меняет не только status и метки времени: %s" % sorted(args)
+        if "status" in args and args["status"] != -1:
+            return "status %r: откат записи только гасит" % args["status"]
+        return None
+    return "%s по path %s в откате не бывает" % (command, path)
+
+
+def check_rollback(body):
+    """(spaceId, операции) из файла отката, либо RollbackError с причиной."""
+    txs = body.get("transactions") if isinstance(body, dict) else None
+    if not isinstance(txs, list) or len(txs) != 1 or not isinstance(txs[0], dict):
+        raise RollbackError(
+            "в файле нет ровно одной транзакции — это не файл отката comment или comment-reply.")
+    space, ops = txs[0].get("spaceId"), txs[0].get("operations")
+    if not isinstance(space, str) or not space:
+        raise RollbackError("у транзакции в файле нет spaceId.")
+    if not isinstance(ops, list) or not ops:
+        raise RollbackError("в транзакции нет операций.")
+    for i, op in enumerate(ops):
+        problem = rollback_op_problem(op)
+        if problem:
+            raise RollbackError(
+                "операция [%d] не из отката команд комментариев: %s.\n  %s"
+                % (i, problem, json.dumps(op, ensure_ascii=False)[:300]))
+    return space, ops
+
+
 # Режимы билдера: режим → число позиционных аргументов после «--».
 ARITY = {
     "build": 6,            # <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
@@ -683,6 +748,7 @@ ARITY = {
     "reply-verdict": 3,    # <after_json> <discussion_id> <comment_id>
     "resolve": 2,          # <doc_json> <discussion_id>
     "resolve-verdict": 2,  # <after_json> <discussion_id>
+    "check-rollback": 1,   # <rollback_file>
 }
 
 
@@ -698,7 +764,7 @@ def parse_args(argv):
             # дефисами («--force», «-- не согласен») не доходит до билдера
             # никакой формой ввода: они едут через argv, в том числе из @file.
             end_of_opts = True
-        elif a in ("--verdict", "--reply", "--reply-verdict"):
+        elif a in ("--verdict", "--reply", "--reply-verdict", "--check-rollback"):
             mode = a[2:]
         elif a.split("=", 1)[0] in ("--resolve", "--resolve-verdict"):
             flag, _, raw = a.partition("=")
@@ -760,12 +826,17 @@ def main():
         elif mode == "resolve-verdict":
             after_path, discussion_id = args
             print(resolve_verdict(load_doc(after_path), discussion_id, opts["resolved"]))
+        elif mode == "check-rollback":
+            space, ops = check_rollback(load_doc(args[0]))
+            print(json.dumps({"space": space, "ops": ops}))
         else:
             # Без ensure_ascii=False: вывод разбирает json.load, ему \uXXXX всё
             # равно, а печать не-ASCII падает под не-UTF-8 локалью (LC_ALL=C).
             print(json.dumps(build_comment(args, opts)))
     except (AnchorError, ThreadError) as e:
         raise SystemExit("Error: %s" % e)
+    except RollbackError as e:
+        raise SystemExit("Error: файл отката отвергнут, %s" % e)
 
 
 if __name__ == "__main__":

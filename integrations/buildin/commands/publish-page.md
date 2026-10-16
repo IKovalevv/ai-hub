@@ -293,11 +293,16 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" insert-blocks-before "<page_id>" "<bloc
 
    Перед записью сохраняется payload отката — готовое тело запроса; путь
    печатается в stderr (`Откат: <путь>`), меняется опцией `--rollback-out=<path>`.
-   Применяется он на уровень ниже:
+   Применяется он командой `comment-rollback`:
 
    ```bash
-   bash "$BUILDIN_SCRIPTS/buildin.sh" POST /api/records/transactions "$(cat <путь>)"
+   bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-rollback "<путь>"
    ```
+
+   После применения файл становится `<путь>.applied`, и повтор команда
+   отвергает. Файл, в котором есть что-то кроме операций отката, она не
+   отправит. Код `2` — исход неизвестен: файл остаётся на месте, сначала
+   посмотри блок командой `comments`.
 
    **Ответ в тред** — продолжить существующее обсуждение. Id треда — строка
    `Тред <uuid>` в выводе `comments`; текст — в тех же формах, что у `comment`,

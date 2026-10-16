@@ -2,7 +2,7 @@
 # bash-слой команд комментариев под /bin/bash: у comment — разбор аргументов,
 # формы ввода, --dry-run, откат, поведение при параллельной записи; у
 # comment-reply и comment-resolve/unresolve — запись, отказы до неё и исходы
-# проверки после.
+# проверки после; у comment-rollback — проверка файла и защита от повтора.
 #
 # Зачем отдельно от bats-юнитов: те бьют по чистому питоновскому билдеру, а
 # ошибки разбора аргументов и склейки живут в shell. Опечатка «--dryrun», молча
@@ -957,6 +957,98 @@ if [ "$RC" -eq 1 ] && stderr | grep -q 'не применилась' && stderr |
     ok "неприменившийся ответ — код 1 и «повтор безопасен»"
 else
     fail "неприменившийся ответ принят за успех (rc=$RC): $(stderr | tail -2)"
+fi
+
+# ---- comment-rollback ---------------------------------------------------------
+RB="$TMP/rb-apply.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+RC2=$(run_sub comment-rollback "$RB")
+ST=$(block_state)
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ ! -e "$RB" ] && [ -s "$RB.applied" ] && stdout | grep -q 'rollback: applied' \
+   && echo "$ST" | python3 -c "
+import json, sys
+st = json.load(sys.stdin)
+assert st['listed'] == [] and st['lit'] == [] and st['n'] == 3, st
+" 2>/dev/null; then
+    ok "comment-rollback вернул блок к снапшоту и переименовал файл в .applied"
+else
+    fail "comment-rollback (rc=$RC2, файлы: $(ls "$RB"* 2>/dev/null | tr '\n' ' ')): $(stderr | tail -2) $ST"
+fi
+
+RC=$(run_sub comment-rollback "$RB")
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'Он уже применён'; then
+    ok "повтор отката по прежнему пути отвергнут с указанием на .applied"
+else
+    fail "повтор отката не отвергнут (rc=$RC): $(stderr | head -2)"
+fi
+
+RC=$(run_sub comment-rollback "$RB.applied")
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'суффикс .applied'; then
+    ok "файл .applied второй раз не применяется"
+else
+    fail "файл .applied применён повторно (rc=$RC)"
+fi
+
+printf '%s' '{"requestId":"r","transactions":[{"id":"t","spaceId":"'"$SPACE"'","operations":[{"id":"'"$BLOCK"'","command":"set","table":"block","path":[],"args":{}}]}]}' > "$TMP/rb-foreign.json"
+RC=$(run_sub comment-rollback "$TMP/rb-foreign.json")
+if [ "$RC" -eq 1 ] && ! sent && [ -e "$TMP/rb-foreign.json" ] && stderr | grep -q 'файл отката отвергнут'; then
+    ok "чужая транзакция в файле отката отвергнута, файл не тронут"
+else
+    fail "чужая транзакция в файле отката не отвергнута (rc=$RC): $(stderr | head -2)"
+fi
+
+printf 'не json' > "$TMP/rb-garbage.json"
+RC=$(run_sub comment-rollback "$TMP/rb-garbage.json")
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'файл отката отвергнут'; then
+    ok "не-JSON вместо файла отката отвергнут"
+else
+    fail "не-JSON вместо файла отката не отвергнут (rc=$RC)"
+fi
+
+RC=$(run_sub comment-rollback "$TMP/rb-garbage.json" лишний)
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q 'Usage: comment-rollback'; then
+    ok "comment-rollback с лишним аргументом — справка без записи"
+else
+    fail "comment-rollback принял лишний аргумент (rc=$RC)"
+fi
+
+RB="$TMP/rb-fail.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+export STUB_FAIL_POST=1
+RC2=$(run_sub comment-rollback "$RB")
+unset STUB_FAIL_POST
+if [ "$RC2" -eq 2 ] && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && stderr | grep -q 'файл не переименован'; then
+    ok "сбой POST при откате — код 2, файл остаётся на месте"
+else
+    fail "сбой POST при откате (rc=$RC2, файлы: $(ls "$RB"* 2>/dev/null | tr '\n' ' '))"
+fi
+
+# Каталог только на чтение: файл не переименовать, но откат уже ушёл — команда
+# обязана предупредить, а не упасть молча. Под root права каталога не мешают
+# переименованию, поэтому там проверка не имеет смысла.
+if [ "$(id -u)" -ne 0 ]; then
+    mkdir -p "$TMP/ro"
+    RB="$TMP/ro/rb.json"
+    RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+    chmod 555 "$TMP/ro"
+    RC2=$(run_sub comment-rollback "$RB")
+    chmod 755 "$TMP/ro"
+    if [ "$RC2" -eq 0 ] && sent && stderr | grep -q 'переименовать' && stderr | grep -q 'Повторно его не применяйте'; then
+        ok "откат ушёл, а файл не переименовался — громкое предупреждение"
+    else
+        fail "неудачное переименование файла отката (rc=$RC2): $(stderr | tail -2)"
+    fi
+fi
+
+RB="$TMP/rb-reply-apply.json"
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' "--rollback-out=$RB")
+NEW=$(stdout | sed -n 's/^comment: //p')
+RC2=$(run_sub comment-rollback "$RB")
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$(thread_comments)" = "$FIRST" ] && [ "$(message_field "$NEW" status)" = "-1" ]; then
+    ok "comment-rollback откатывает и ответ в тред"
+else
+    fail "откат ответа через comment-rollback (rc=$RC2, тред=$(thread_comments))"
 fi
 
 echo "---"

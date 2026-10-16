@@ -36,6 +36,8 @@
 #                                                — закрыть тред (резолв); уже закрытый — без записи
 #   comment-unresolve <page_id|url> <discussion_id> [--dry-run]
 #                                                — открыть закрытый тред заново
+#   comment-rollback <file>                      — применить файл отката comment/comment-reply;
+#                                                  файл становится <file>.applied, повтор — отказ
 #   publish-md <page_id> <file.md> [--replace]          — опубликовать markdown-файл
 #                                                        (по умолчанию дописывает в конец;
 #                                                         --replace заменяет содержимое)
@@ -853,6 +855,40 @@ print(built['comment'])
         esac
         echo "Тред $DISCUSSION $STATE." >&2
         echo "discussion: $DISCUSSION"
+        ;;
+
+    comment-rollback)
+        USAGE='Usage: comment-rollback <file>
+  <file>: файл отката из stderr comment или comment-reply («Откат: <путь>»)
+  после применения файл переименовывается в <file>.applied — повтор отвергается'
+        FILE="${1:-}"
+        [[ -n "$FILE" && $# -eq 1 ]] || { echo "$USAGE" >&2; exit 1; }
+        # Применённый откат второй раз не применяется: полный откат снова вернул
+        # бы блок к старому снапшоту и стёр бы подсветку тех, кто успел
+        # прокомментировать после первого применения.
+        [[ "$FILE" == *.applied ]] && { echo "Error: $FILE уже применён (суффикс .applied) — повтор отвергнут." >&2; exit 1; }
+        if [[ ! -f "$FILE" ]]; then
+            echo "Error: файла отката нет: $FILE" >&2
+            [[ -f "$FILE.applied" ]] && echo "       Он уже применён: $FILE.applied — повтор отвергнут." >&2
+            exit 1
+        fi
+
+        CHECKED=$(python3 "$SCRIPT_DIR/buildin-comment.py" --check-rollback -- "$FILE")
+        SPACE_ID=$(echo "$CHECKED" | python3 -c "import json, sys; print(json.load(sys.stdin)['space'])")
+        OPS=$(echo "$CHECKED" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['ops']))")
+
+        # Конверт собирается заново общим transaction(): в сеть уходит одна
+        # форма тела, а из файла берётся только то, что проверено по операциям.
+        if ! transaction "$SPACE_ID" "$OPS" > /dev/null; then
+            echo "Error: исход отката неизвестен — файл не переименован." >&2
+            echo "       Прежде чем применять снова, посмотрите блок или тред командой comments." >&2
+            exit 2
+        fi
+        if ! mv "$FILE" "$FILE.applied"; then
+            echo "ВНИМАНИЕ: откат применён, но переименовать $FILE не удалось." >&2
+            echo "          Повторно его не применяйте." >&2
+        fi
+        echo "rollback: applied ($FILE.applied)"
         ;;
 
     read)

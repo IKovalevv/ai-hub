@@ -774,3 +774,70 @@ reply_verdict() { python3 "$OPS_PY" --reply-verdict -- "$1" "$THREAD" "$2"; }
     printf '{"code":500,"msg":"no rights"}' > "$BATS_TEST_TMPDIR/a.json"
     [ "$(reply_verdict "$BATS_TEST_TMPDIR/a.json" 77777777-7777-4777-8777-777777777777)" = "unverified" ]
 }
+
+# ---- проверка файла отката --------------------------------------------------
+
+# Файл отката из массива операций $1 — тем же конвертом, что пишет команда.
+mkrollback() {
+    python3 -c "
+import json, sys
+print(json.dumps({'requestId': 'r', 'transactions': [
+    {'id': 't', 'spaceId': sys.argv[2], 'operations': json.loads(sys.argv[1])}]}))
+" "$1" "$SPACE" > "$BATS_TEST_TMPDIR/rb.json"
+}
+check_rb() { python3 "$OPS_PY" --check-rollback -- "$BATS_TEST_TMPDIR/rb.json"; }
+
+@test "rollback files of comment and comment-reply pass the check unchanged" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    ops=$(build "beta" "note" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
+    mkrollback "$ops"
+    [ "$(check_rb | python3 -c "import json, sys; r = json.load(sys.stdin); print(r['space'], json.dumps(r['ops']))")" = "$SPACE $ops" ]
+    mkthread false
+    ops=$(reply "ответ" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
+    mkrollback "$ops"
+    [ "$(check_rb | python3 -c "import json, sys; r = json.load(sys.stdin); print(r['space'], json.dumps(r['ops']))")" = "$SPACE $ops" ]
+}
+
+@test "anything but rollback operations of the comment commands is refused with the reason" {
+    run python3 - "$OPS_PY" "$BATS_TEST_TMPDIR" "$BLOCK" "$SPACE" <<'PY'
+import json, subprocess, sys
+ops_py, tmp, block, space = sys.argv[1:5]
+d = "66666666-6666-4666-8666-666666666666"
+def tx(ops, space=space):
+    return {"requestId": "r", "transactions": [{"id": "t", "spaceId": space, "operations": ops}]}
+ok_op = {"id": block, "command": "update", "table": "block", "path": [], "args": {}}
+cases = [
+    ({"requestId": "r"}, "нет ровно одной транзакции"),
+    ({"transactions": tx([ok_op])["transactions"] * 2}, "нет ровно одной транзакции"),
+    (tx([ok_op], space=""), "нет spaceId"),
+    (tx([]), "нет операций"),
+    (tx(["op"]), "не объект"),
+    (tx([dict(ok_op, id="not-a-uuid")]), "id не UUID"),
+    (tx([dict(ok_op, args="x")]), "args не объект"),
+    (tx([dict(ok_op, command="set")]), "в откате не бывает"),
+    (tx([{"id": block, "command": "listRemove", "table": "block", "path": ["subNodes"], "args": {"uuid": d}}]),
+     "listRemove не из списка"),
+    (tx([{"id": block, "command": "listRemove", "table": "block", "path": ["discussions"], "args": {}}]),
+     "listRemove без uuid"),
+    (tx([{"id": d, "command": "update", "table": "discussion", "path": ["data"], "args": {"segments": []}}]),
+     "не возврат segments"),
+    (tx([dict(ok_op, table="space")]), "update таблицы space"),
+    (tx([{"id": d, "command": "update", "table": "discussion", "path": [], "args": {"resolved": False}}]),
+     "не только status"),
+    (tx([{"id": d, "command": "update", "table": "discussion", "path": [], "args": {"status": 1}}]),
+     "только гасит"),
+]
+bad = []
+for body, want in cases:
+    path = tmp + "/rb.json"
+    json.dump(body, open(path, "w"))
+    run = subprocess.run([sys.executable, ops_py, "--check-rollback", "--", path], capture_output=True, text=True)
+    if run.returncode == 0 or want not in run.stderr:
+        bad.append((want, run.returncode, run.stderr.strip()[:200]))
+for b in bad:
+    print("NOT REFUSED AS EXPECTED:", b)
+sys.exit(1 if bad else 0)
+PY
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
