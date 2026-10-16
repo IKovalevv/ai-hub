@@ -31,6 +31,12 @@
 «находится», команда рапортует успех, и проверка после записи ничего не
 замечает: сегмент реально несёт discussions.
 
+Внутри блока режется только сегмент, у которого text — сам видимый текст:
+обычный текст и ссылка. Дата и инлайн-формула хранят в text не то, что видно
+на странице: у даты заглушку «‣», у формулы исходник LaTeX. Разрез формулы
+проверен живьём: x^{2} по «{2» превратилась в три формулы, и Buildin рисует
+все три ошибкой разбора. Такие объекты комментируются только целиком.
+
 Usage:
     buildin-comment.py [--occurrence=N] -- <doc_json> <block_id> <anchor> <text>
                        <now_ms> <user_id>
@@ -89,6 +95,29 @@ REFUSED_TYPES = {
     28: ("строка таблицы", _IN_TABLE, _TABLE_HINT),
 }
 
+# Типы инлайн-сегментов — проверено живьём на черновой странице.
+SEGMENT_NAMES = {
+    0: "текст",
+    1: "дата",
+    3: "ссылка",
+    4: "упоминание страницы",
+    7: "упоминание человека",
+    8: "инлайн-формула",
+}
+
+# Резать можно только то, у чего text — ровно видимый текст: каждый кусок
+# разреза остаётся тем же текстом с тем же форматированием и ссылкой.
+CUTTABLE_SEGMENTS = {0, 3}
+
+# Цельные объекты: их text — не то, что видит человек, и разрез их ломает, а
+# тред на объект целиком Buildin подсвечивает как обычно (цитатой в треде
+# станет сам text). Упоминаний (4, 7) здесь нет намеренно: их text пуст, и
+# якорь в них не попадает в принципе.
+WHOLE_SEGMENTS = {
+    1: "в text лежит заглушка «‣», а видимую дату Buildin рисует из startDate",
+    8: "в text лежит исходник LaTeX, и разрез ломает формулу",
+}
+
 
 def segment_text(segments):
     """Видимый текст блока: конкатенация сегментов."""
@@ -119,6 +148,23 @@ def invisible_note(text):
     return "\nВнимание, в тексте есть невидимые символы: %s." % "; ".join(parts)
 
 
+def segment_kind(s):
+    """Подпись сегмента, чей text — не видимый текст, либо None.
+
+    Без неё разбор показывает у даты голую «‣», а у упоминания пустые кавычки,
+    и по нему не понять, почему видимая на странице дата якорем не находится.
+    """
+    t = s.get("type")
+    if t in CUTTABLE_SEGMENTS:
+        return None
+    if t == 1:
+        when = " ".join(x for x in (s.get("startDate"), s.get("startTime")) if x)
+        return "дата %s" % when if when else "дата"
+    if t is None:
+        return "без типа"
+    return SEGMENT_NAMES.get(t, "тип %s" % t)
+
+
 def describe_segments(segments):
     """Разбор сегментов для сообщения об ошибке: индекс, текст, форматирование."""
     lines = []
@@ -126,6 +172,9 @@ def describe_segments(segments):
         marks = [k for k, v in (s.get("enhancer") or {}).items() if v]
         if s.get("url"):
             marks.append("link")
+        kind = segment_kind(s)
+        if kind:
+            marks.append(kind)
         suffix = " [%s]" % ", ".join(marks) if marks else ""
         lines.append("  [%d] «%s»%s" % (i, s.get("text", ""), suffix))
     return "\n".join(lines) or "  (сегментов нет)"
@@ -337,6 +386,41 @@ def check_block_type(block, segments):
     )
 
 
+def check_segment_type(segments, index, pos, anchor):
+    """Отказать, если якорь режет сегмент, который резать нельзя.
+
+    Гард того же класса, что и гард по типу блока, но на уровень ниже: разрез
+    инлайн-формулы команда выполняет и рапортует успех, проверка после записи
+    его не ловит — сегмент реально несёт discussions, — а на странице вместо
+    формулы ошибки разбора.
+
+    Список закрытый по той же причине, что и PROSE_TYPES: новый инлайн-объект
+    Buildin с непрозрачным text должен отвергаться, пока его не проверят живьём.
+    """
+    seg = segments[index]
+    stype = seg.get("type")
+    if stype in CUTTABLE_SEGMENTS:
+        return
+    text = seg.get("text", "")
+    if stype in WHOLE_SEGMENTS:
+        if pos == 0 and len(anchor) == len(text):
+            return
+        raise AnchorError(
+            "Якорь режет сегмент [%d] (%s): %s.\n"
+            "Такой объект комментируется только целиком — якорем «%s».\n"
+            "Сегменты:\n%s"
+            % (index, SEGMENT_NAMES[stype], WHOLE_SEGMENTS[stype], text, describe_segments(segments))
+        )
+    kind = "типа %s" % stype if stype is not None else "без типа"
+    raise AnchorError(
+        "Якорь попал в сегмент [%d] %s — такой сегмент команда не режет: нет уверенности, "
+        "что его text — видимый на странице текст и что разрез его не сломает.\n"
+        "Сегменты:\n%s\n"
+        "Если этот тип показывает на странице ровно свой text — добавьте его в CUTTABLE_SEGMENTS."
+        % (index, kind, describe_segments(segments))
+    )
+
+
 def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None):
     """Операции транзакции и операции отката. Без сети и без записи на диск."""
     if not text:
@@ -348,6 +432,7 @@ def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None):
 
     check_block_type(block, segments)
     index, pos = find_anchor(segments, anchor, occurrence)
+    check_segment_type(segments, index, pos, anchor)
     discussion_id, comment_id = str(uuid.uuid4()), str(uuid.uuid4())
     new_segments = split_segments(segments, index, pos, anchor, discussion_id)
     check_resplit(segments, new_segments, index, discussion_id)

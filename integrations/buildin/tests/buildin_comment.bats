@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# Unit tests for buildin-comment.py — block-type guard, anchor lookup, resplit checks.
+# Unit tests for buildin-comment.py — block- and segment-type guards, anchor lookup, resplit checks.
 #
 # Поиск якоря и перенарезка сегментов — место, где ошибка тихая: тред
 # привяжется не к той фразе или незаметно испортит блок. Поэтому здесь чистая
@@ -456,6 +456,84 @@ import importlib.util, sys
 spec = importlib.util.spec_from_file_location('bc', sys.argv[1])
 bc = importlib.util.module_from_spec(spec); spec.loader.exec_module(bc)
 both = set(bc.PROSE_TYPES) & set(bc.REFUSED_TYPES)
+print('overlap:', sorted(both))
+sys.exit(1 if both else 0)
+" "$OPS_PY"
+    [ "$status" -eq 0 ]
+}
+
+# --- гард по типу сегмента ---------------------------------------------------
+#
+# Тот же тихий провал уровнем ниже: разрез инлайн-формулы проходит, сверка
+# после записи довольна, а на странице вместо формулы ошибки разбора. Проверено
+# живьём: x^{2} по «{2» превратилась в три формулы, все три — ошибка разбора.
+
+FORMULA='[{"text": "Формула: ", "type": 0, "enhancer": {}}, {"text": "x^{2}", "type": 8, "enhancer": {}}, {"text": " конец", "type": 0, "enhancer": {}}]'
+DATE='[{"text": "срок: ", "type": 0, "enhancer": {}}, {"text": "‣", "type": 1, "enhancer": {}, "startDate": "2026/10/16", "startTime": "14:30"}]'
+
+@test "anchor inside an inline equation is refused" {
+    mkdoc "$FORMULA"
+    err=$(build_stderr "{2" "note") || true
+    [[ "$err" == *"Якорь режет сегмент [1] (инлайн-формула)"* ]]
+    [[ "$err" == *"только целиком — якорем «x^{2}»"* ]]
+}
+
+@test "whole inline equation is commented without a cut" {
+    mkdoc "$FORMULA"
+    result=$(build "x^{2}" "note" | probe "
+segs = seg_op['args']['segments']
+print(len(segs), segs[1]['type'], segs[1]['text'], segs[1]['discussions'] == [r['discussion']])")
+    [ "$result" = "3 8 x^{2} True" ]
+}
+
+@test "date chip is commented whole by its placeholder" {
+    mkdoc "$DATE"
+    result=$(build "‣" "note" | probe "
+segs = seg_op['args']['segments']
+print(len(segs), segs[1]['type'], segs[1]['startDate'], segs[1]['discussions'] == [r['discussion']])")
+    [ "$result" = "2 1 2026/10/16 True" ]
+}
+
+@test "real link segment is still cut with the url on every part" {
+    mkdoc '[{"text": "see the docs page", "type": 3, "enhancer": {}, "url": "https://example.com"}]'
+    result=$(build "docs" "note" | probe "
+segs = seg_op['args']['segments']
+print(len(segs), all(s['type'] == 3 and s['url'] == 'https://example.com' for s in segs))")
+    [ "$result" = "3 True" ]
+}
+
+@test "unknown segment type is refused so a new inline object cannot be cut" {
+    mkdoc '[{"text": "alpha beta", "type": 99, "enhancer": {}}]'
+    err=$(build_stderr "beta" "note") || true
+    [[ "$err" == *"сегмент [0] типа 99"* ]]
+    [[ "$err" == *"CUTTABLE_SEGMENTS"* ]]
+}
+
+@test "unknown segment type is refused even when taken whole" {
+    mkdoc '[{"text": "alpha ", "type": 0, "enhancer": {}}, {"text": "beta", "type": 99, "enhancer": {}}]'
+    err=$(build_stderr "beta" "note") || true
+    [[ "$err" == *"сегмент [1] типа 99"* ]]
+}
+
+@test "segment without a type is refused" {
+    mkdoc '[{"text": "alpha beta", "enhancer": {}}]'
+    err=$(build_stderr "beta" "note") || true
+    [[ "$err" == *"сегмент [0] без типа"* ]]
+}
+
+@test "missing anchor listing names the date and the mention by kind" {
+    mkdoc '[{"text": "срок ", "type": 0, "enhancer": {}}, {"text": "‣", "type": 1, "enhancer": {}, "startDate": "2026/10/16", "startTime": "14:30"}, {"text": "", "type": 7, "enhancer": {}, "uuid": "55555555-5555-4555-8555-555555555555"}]'
+    err=$(build_stderr "16 октября" "note") || true
+    [[ "$err" == *"[1] «‣» [дата 2026/10/16 14:30]"* ]]
+    [[ "$err" == *"[2] «» [упоминание человека]"* ]]
+}
+
+@test "cuttable and whole-only segment types do not overlap" {
+    run python3 -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('bc', sys.argv[1])
+bc = importlib.util.module_from_spec(spec); spec.loader.exec_module(bc)
+both = set(bc.CUTTABLE_SEGMENTS) & set(bc.WHOLE_SEGMENTS)
 print('overlap:', sorted(both))
 sys.exit(1 if both else 0)
 " "$OPS_PY"
