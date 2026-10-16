@@ -238,7 +238,7 @@ print(len(segs), all(s.get('url') == 'https://example.com' for s in segs))")
 @test "anchor occurring twice is rejected with both occurrences listed" {
     mkdoc '[{"text": "безлимитный тариф: лимит 100", "type": 0, "enhancer": {}}]'
     err=$(build_stderr "лимит" "note") || true
-    [[ "$err" == *"встречается в блоке 2 раз(а)"* ]]
+    [[ "$err" == *"встречается в блоке 2 раз(а)"* ]] || false
     [[ "$err" == *"--occurrence=N"* ]]
 }
 
@@ -267,8 +267,8 @@ print('|'.join(s['text'] for s in seg_op['args']['segments']),
 @test "anchor crossing a segment boundary is rejected as split, not missing" {
     mkdoc '[{"text": "alpha ", "type": 0, "enhancer": {}}, {"text": "beta", "type": 0, "enhancer": {"code": true}}]'
     err=$(build_stderr "alpha beta" "note") || true
-    [[ "$err" == *"разорван границей сегментов"* ]]
-    [[ "$err" == *"[0] «alpha »"* ]]
+    [[ "$err" == *"разорван границей сегментов"* ]] || false
+    [[ "$err" == *"[0] «alpha »"* ]] || false
     [[ "$err" == *"[1] «beta» [code]"* ]]
 }
 
@@ -282,7 +282,7 @@ print('|'.join(s['text'] for s in seg_op['args']['segments']),
 @test "anchor absent from the block text is reported as missing" {
     mkdoc '[{"text": "alpha beta gamma", "type": 0, "enhancer": {}}]'
     err=$(build_stderr "delta" "note") || true
-    [[ "$err" == *"Якоря нет в тексте блока"* ]]
+    [[ "$err" == *"Якоря нет в тексте блока"* ]] || false
     [[ "$err" == *"alpha beta gamma"* ]]
 }
 
@@ -307,7 +307,7 @@ print('|'.join(s['text'] for s in seg_op['args']['segments']),
 @test "unknown block id is reported with a hint about get-blocks" {
     mkdoc '[{"text": "alpha", "type": 0, "enhancer": {}}]'
     err=$(python3 "$OPS_PY" "$DOC" "44444444-4444-4444-4444-444444444444" "alpha" "note" "$NOW" "$USER" 2>&1 >/dev/null) || true
-    [[ "$err" == *"не найден на странице"* ]]
+    [[ "$err" == *"не найден на странице"* ]] || false
     [[ "$err" == *"get-blocks"* ]]
 }
 
@@ -408,8 +408,8 @@ print([(o['command'], o['table']) for o in rec] ==
 @test "image block is refused and its segments are shown to be the file name" {
     mkdoc '[{"text": "picture.png", "type": 0, "enhancer": {}}]' '[]' 14
     err=$(build_stderr "picture" "note") || true
-    [[ "$err" == *"Блок типа 14 (картинка)"* ]]
-    [[ "$err" == *"имя файла"* ]]
+    [[ "$err" == *"Блок типа 14 (картинка)"* ]] || false
+    [[ "$err" == *"имя файла"* ]] || false
     [[ "$err" == *"picture.png"* ]]
 }
 
@@ -440,14 +440,14 @@ print([(o['command'], o['table']) for o in rec] ==
 @test "unknown block type is refused so a new Buildin type cannot slip through" {
     mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]' '[]' 99
     err=$(build_stderr "beta" "note") || true
-    [[ "$err" == *"Блок типа 99 команде неизвестен"* ]]
+    [[ "$err" == *"Блок типа 99 команде неизвестен"* ]] || false
     [[ "$err" == *"PROSE_TYPES"* ]]
 }
 
 @test "type guard runs before the anchor lookup" {
     mkdoc '[{"text": "picture.png", "type": 0, "enhancer": {}}]' '[]' 14
     err=$(build_stderr "no-such-anchor" "note") || true
-    [[ "$err" == *"Блок типа 14"* ]]
+    [[ "$err" == *"Блок типа 14"* ]] || false
     [[ "$err" != *"Якоря нет в тексте блока"* ]]
 }
 
@@ -475,7 +475,7 @@ DATE='[{"text": "срок: ", "type": 0, "enhancer": {}}, {"text": "‣", "type"
 @test "anchor inside an inline equation is refused" {
     mkdoc "$FORMULA"
     err=$(build_stderr "{2" "note") || true
-    [[ "$err" == *"Якорь режет сегмент [1] (инлайн-формула)"* ]]
+    [[ "$err" == *"Якорь режет сегмент [1] (инлайн-формула)"* ]] || false
     [[ "$err" == *"только целиком — якорем «x^{2}»"* ]]
 }
 
@@ -506,7 +506,7 @@ print(len(segs), all(s['type'] == 3 and s['url'] == 'https://example.com' for s 
 @test "unknown segment type is refused so a new inline object cannot be cut" {
     mkdoc '[{"text": "alpha beta", "type": 99, "enhancer": {}}]'
     err=$(build_stderr "beta" "note") || true
-    [[ "$err" == *"сегмент [0] типа 99"* ]]
+    [[ "$err" == *"сегмент [0] типа 99"* ]] || false
     [[ "$err" == *"CUTTABLE_SEGMENTS"* ]]
 }
 
@@ -525,7 +525,7 @@ print(len(segs), all(s['type'] == 3 and s['url'] == 'https://example.com' for s 
 @test "missing anchor listing names the date and the mention by kind" {
     mkdoc '[{"text": "срок ", "type": 0, "enhancer": {}}, {"text": "‣", "type": 1, "enhancer": {}, "startDate": "2026/10/16", "startTime": "14:30"}, {"text": "", "type": 7, "enhancer": {}, "uuid": "55555555-5555-4555-8555-555555555555"}]'
     err=$(build_stderr "16 октября" "note") || true
-    [[ "$err" == *"[1] «‣» [дата 2026/10/16 14:30]"* ]]
+    [[ "$err" == *"[1] «‣» [дата 2026/10/16 14:30]"* ]] || false
     [[ "$err" == *"[2] «» [упоминание человека]"* ]]
 }
 
@@ -671,7 +671,7 @@ print(r['ops'] == [{'id': '$THREAD', 'command': 'update', 'table': 'discussion',
 @test "thread missing from the page is refused with a hint about comments" {
     mkdoc '[{"text": "alpha", "type": 0, "enhancer": {}}]'
     err=$(resolve_stderr true) || true
-    [[ "$err" == *"Треда $THREAD на странице нет"* ]]
+    [[ "$err" == *"Треда $THREAD на странице нет"* ]] || false
     [[ "$err" == *"buildin-pages.sh comments"* ]]
 }
 
@@ -746,7 +746,7 @@ print([(o['command'], o['table'], o['path']) for o in rb],
 @test "reply into a resolved thread is refused with a hint to reopen it" {
     mkthread true
     err=$(reply_stderr "ответ") || true
-    [[ "$err" == *"Тред $THREAD закрыт"* ]]
+    [[ "$err" == *"Тред $THREAD закрыт"* ]] || false
     [[ "$err" == *"comment-unresolve"* ]]
 }
 
