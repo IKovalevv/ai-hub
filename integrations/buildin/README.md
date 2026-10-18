@@ -153,6 +153,13 @@ bash $DIR/buildin-pages.sh comment <id|url> <block_uuid> 'фраза-якорь'
 bash $DIR/buildin-pages.sh comment-reply <id|url> <discussion_uuid> 'текст ответа'
 bash $DIR/buildin-pages.sh comment-resolve <id|url> <discussion_uuid>
 bash $DIR/buildin-pages.sh comment-unresolve <id|url> <discussion_uuid>
+
+# Позвать человека: uuid участников — из members, упоминание — опцией --mention
+bash $DIR/buildin-pages.sh members <id|url>
+bash $DIR/buildin-pages.sh comment-reply <id|url> <discussion_uuid> 'посмотри' --mention=<user_uuid>
+
+# Откатить comment или comment-reply — путь из строки «rollback: <путь>» в stdout
+bash $DIR/buildin-pages.sh comment-rollback <путь> [--narrow] [--dry-run]
 ```
 
 `comment` принимает идентификаторы в тех же формах, что и `comments`: блок задаётся
@@ -460,6 +467,11 @@ Buildin на странице не показывает, и ответ в нём
 
 `--mention=<user_uuid>` упоминает участника пространства в начале сообщения — и у
 `comment`, и у `comment-reply`. Опцию можно повторять, повторы одного uuid схлопываются.
+
+Ограничения намеренные. Упоминание встаёт только в начало: позвать человека — это всё,
+что нужно агенту, а упоминание посреди текста потребовало бы своего синтаксиса и
+экранирования. Упомянуть можно только человека: упоминание страницы (`type: 4`) никого
+не уведомляет, а ссылку на страницу можно дать текстом.
 
 ```bash
 bash $DIR/buildin-pages.sh comment-reply <id|url> <discussion_uuid> 'посмотри, пожалуйста' --mention=<user_uuid>

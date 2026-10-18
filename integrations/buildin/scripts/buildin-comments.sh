@@ -37,6 +37,8 @@
 #                                                  блок меняли после комментария — полный откат
 #                                                  отвергается, --narrow снимает только свой тред;
 #                                                  в треде чужой ответ или записи не ваши — отказ
+#   members <page_id|url>                        — участники пространства страницы: «<uuid>  <nickname>»,
+#                                                  uuid — для --mention
 
 # pipefail обязателен вместе с JSON-отказом из buildin.sh: без него сбой клиента
 # в конвейере `buildin ... | python3` маскируется нулевым статусом питона,
@@ -249,13 +251,27 @@ print(next(iter(blocks.values()), {}).get('spaceId', ''))
 print_commands() {
     echo "  comments <id|url[#block_id]> [block_id]  — комментарии страницы или блока (якорь #block-uuid фильтрует)"
     echo "  comment <id|url[#block_id]> [block_id] <anchor> <text>"
-    echo "          [--dry-run] [--occurrence=N] [--rollback-out=<path>]"
+    echo "          [--dry-run] [--occurrence=N] [--rollback-out=<path>] [--mention=<user_uuid>]..."
     echo "                                           — комментарий к фразе <anchor> внутри блока"
     echo "                                             <anchor>/<text>: строка, @путь — файл, - — stdin"
     echo "                                             (@@текст — литеральный @текст; значение с ведущими"
     echo "                                              дефисами — после разделителя --)"
     echo "                                             неоднозначный якорь — отказ, см. --occurrence=N"
     echo "                                             только прозаические блоки; картинка/таблица/код — отказ"
+    echo "                                             дату и инлайн-формулу — только целиком"
+    echo "                                             stdout: discussion: <uuid>, rollback: <путь>"
+    echo "  comment-reply <id|url> <discussion_id> <text> [--dry-run] [--rollback-out=<path>]"
+    echo "          [--mention=<user_uuid>]...       — ответ в тред; в закрытый — отказ, сначала comment-unresolve"
+    echo "                                             stdout: comment: <uuid>, rollback: <путь>"
+    echo "  comment-resolve <id|url> <discussion_id> [--dry-run]   — закрыть тред"
+    echo "  comment-unresolve <id|url> <discussion_id> [--dry-run] — открыть тред заново"
+    echo "                                             stdout: discussion: <uuid>, status: changed|noop"
+    echo "  comment-rollback <file> [--narrow] [--dry-run]"
+    echo "                                           — откат comment/comment-reply по файлу из «rollback: <путь>»;"
+    echo "                                             чужие ответы в треде или записи не ваши — отказ;"
+    echo "                                             блок меняли — полный откат отвергнут, --narrow снимает тред"
+    echo "  members <id|url>                         — участники пространства: «<uuid>  <nickname>» для --mention"
+    echo "                                             (упоминание — только людей и только в начале текста)"
 }
 
 COMMAND="${1:-help}"

@@ -651,4 +651,20 @@ else
     fail "members принял лишний аргумент (rc=$RC)"
 fi
 
+
+# ---- справка -----------------------------------------------------------------
+# Справка обязана называть каждую команду скрипта: новые команды в неё уже
+# забывали добавить, и агент о них не узнавал.
+RC=$(run_cmd help)
+MISSING=""
+for C in $(sed -n 's/^    \([a-z|-]*\))$/\1/p' "$SRC_DIR/buildin-comments.sh" | tr '|' ' '); do
+    case "$C" in commands|help) continue ;; esac
+    stdout | grep -q "^  $C " || MISSING="$MISSING $C"
+done
+if [ "$RC" -eq 0 ] && [ -z "$MISSING" ] && stdout | grep -q '^  members '; then
+    ok "справка buildin-pages.sh называет все команды комментариев"
+else
+    fail "в справке нет команд:$MISSING (rc=$RC)"
+fi
+
 finish

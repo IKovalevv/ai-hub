@@ -85,9 +85,18 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comments "<page_id|url>"
 
 URL с якорем (`https://buildin.ai/<page>#<block>`) фильтрует по конкретному блоку —
 передавай его как есть. Пустой текст комментария из одних `@Имя` — это пинг людей
-без реплики, так и объясняй. Ответить в тред, закрыть его или открыть заново —
-команды `comment-reply`, `comment-resolve` и `comment-unresolve` (см.
-`/ai-hub:buildin-publish`).
+без реплики, так и объясняй. Ответить в тред, закрыть его или открыть заново
+можно прямо отсюда; id треда — строка `Тред <uuid>` в выводе `comments`:
+
+```bash
+bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-reply "<page_id>" "<discussion_uuid>" 'текст ответа'
+bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-resolve "<page_id>" "<discussion_uuid>"
+bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-unresolve "<page_id>" "<discussion_uuid>"
+```
+
+Это запись в чужой документ — только по просьбе пользователя. Текст с кавычками
+или `$` передавай файлом (`@путь`), упоминания, коды выхода и откат — в
+`/ai-hub:buildin-publish`.
 
 ### Фаза 3: Обновить shadow-индекс
 
