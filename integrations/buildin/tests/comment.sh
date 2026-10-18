@@ -129,6 +129,7 @@ APPLY
 #   STUB_MUTATE_ON_GET=N       — начиная с N-го чтения сегменты блока другие
 #   STUB_IGNORE_WRITES         — POST принимается, но состояние не меняется
 #   STUB_FAIL_MEMBERS          — список участников пространства не отдаётся
+#   STUB_FAIL_DOCS             — страница не читается вовсе
 restore_stateful_stub() {
     cat > "$TMP/scripts/buildin.sh" <<STUB
 #!/usr/bin/env bash
@@ -142,6 +143,7 @@ case "\$ENDPOINT" in
         if [ -n "\${STUB_FAIL_MEMBERS:-}" ]; then echo "Error: HTTP 403" >&2; exit 1; fi
         echo '{"code":200,"data":[{"user":{"uuid":"user-1","nickname":"agent"}},{"user":{"uuid":"$OTHER","nickname":"j.doe"}}]}' ;;
     /api/docs/$PAGE)
+        if [ -n "\${STUB_FAIL_DOCS:-}" ]; then echo "Error: HTTP 503" >&2; exit 1; fi
         N=\$(cat "\$LOG_DIR/getn" 2>/dev/null || echo 0); N=\$((N + 1)); echo "\$N" > "\$LOG_DIR/getn"
         if [ -n "\${STUB_FAIL_GET_AFTER_WRITE:-}" ] && [ -s "\$LOG_DIR/tx-body.json" ]; then
             echo "Error: HTTP 503" >&2; exit 1
@@ -1044,6 +1046,87 @@ if [ "$(id -u)" -ne 0 ]; then
     else
         fail "неудачное переименование файла отката (rc=$RC2): $(stderr | tail -2)"
     fi
+fi
+
+# ---- свежесть файла отката и --narrow ----------------------------------------
+RB="$TMP/rb-check.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+if [ "$RC" -eq 0 ] && python3 -c "
+import json
+b = json.load(open('$RB'))
+segs = json.load(open('$TMP/state.json'))['data']['blocks']['$BLOCK']['data']['segments']
+assert b['check']['page'] == '$PAGE' and b['check']['block'] == '$BLOCK', b['check']
+assert b['check']['segments'] == segs, (b['check']['segments'], segs)
+" 2>/dev/null; then
+    ok "файл отката comment несёт сверку: страница, блок и сегменты после записи"
+else
+    fail "в файле отката нет сверки или она не та (rc=$RC)"
+fi
+
+RB="$TMP/rb-stale.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'первый' "--rollback-out=$RB")
+FIRST_D=$(stdout | sed -n 's/^discussion: //p')
+RC2=$(SKIP_RESET=1 run_comment "$PAGE" "$BLOCK" 'безлимитный' 'второй')
+SECOND_D=$(stdout | sed -n 's/^discussion: //p')
+RC3=$(run_sub comment-rollback "$RB")
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 1 ] && ! sent && [ -e "$RB" ] && [ ! -e "$RB.applied" ] \
+   && stderr | grep -q 'блок изменился после комментария' && stderr | grep -q -- '--narrow'; then
+    ok "блок меняли после комментария — полный откат отвергнут, предложен --narrow"
+else
+    fail "устаревший файл отката (rc=$RC3): $(stderr | head -3)"
+fi
+
+RC=$(run_sub comment-rollback "$RB" --narrow)
+ST=$(block_state)
+if [ "$RC" -eq 0 ] && [ -e "$RB.applied" ] && echo "$ST" | python3 -c "
+import json, sys
+st = json.load(sys.stdin)
+assert '$FIRST_D' not in st['listed'], st
+assert '$SECOND_D' in st['listed'] and '$SECOND_D' in st['lit'], st
+assert st['text'] == 'безлимитный тариф: лимит 100 запросов в минуту', st
+" 2>/dev/null && python3 -c "
+import json
+ops = json.load(open('$TMP/log/tx-body.json'))['transactions'][0]['operations']
+assert ops and not any(o.get('path') == ['data'] for o in ops), ops
+" 2>/dev/null; then
+    ok "--narrow снимает только свой тред: сегменты не трогает, чужая подсветка цела"
+else
+    fail "--narrow (rc=$RC): $ST $(stderr | head -2)"
+fi
+
+RB="$TMP/rb-docs-fail.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+export STUB_FAIL_DOCS=1
+RC2=$(run_sub comment-rollback "$RB")
+unset STUB_FAIL_DOCS
+if [ "$RC2" -eq 1 ] && ! sent && [ -e "$RB" ] && stderr | grep -q 'не удалось прочитать страницу'; then
+    ok "страница не читается — сверить нельзя, полный откат не применён"
+else
+    fail "сбой чтения страницы при откате (rc=$RC2): $(stderr | head -2)"
+fi
+
+RB="$TMP/rb-unverified.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+python3 -c "
+import json
+b = json.load(open('$RB')); b['check']['block'] = '$OTHER'; json.dump(b, open('$RB', 'w'))"
+RC2=$(run_sub comment-rollback "$RB")
+if [ "$RC2" -eq 1 ] && ! sent && stderr | grep -q 'нет на странице'; then
+    ok "блока из файла нет на странице — полный откат не применён"
+else
+    fail "блок из файла не найден, а откат применён (rc=$RC2): $(stderr | head -2)"
+fi
+
+RB="$TMP/rb-nocheck.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+python3 -c "
+import json
+b = json.load(open('$RB')); b.pop('check'); json.dump(b, open('$RB', 'w'))"
+RC2=$(run_sub comment-rollback "$RB")
+if [ "$RC2" -eq 0 ] && sent && stderr | grep -q 'нет данных для сверки'; then
+    ok "старый файл без сверки применяется с предупреждением"
+else
+    fail "старый файл без сверки (rc=$RC2): $(stderr | head -2)"
 fi
 
 RB="$TMP/rb-reply-apply.json"

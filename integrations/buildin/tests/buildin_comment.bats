@@ -835,6 +835,7 @@ cases = [
      "не только status"),
     (tx([{"id": d, "command": "update", "table": "discussion", "path": [], "args": {"status": 1}}]),
      "только гасит"),
+    (dict(tx([ok_op]), check={"page": "x"}), "check не по формату"),
 ]
 bad = []
 for body, want in cases:
@@ -847,6 +848,54 @@ for b in bad:
     print("NOT REFUSED AS EXPECTED:", b)
 sys.exit(1 if bad else 0)
 PY
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "build reports the segments it writes, for the rollback freshness check" {
+    mkdoc '[{"text": "alpha beta gamma", "type": 0, "enhancer": {}}]'
+    result=$(build "beta" "note" | probe "print(r['segments_after'] == seg_op['args']['segments'])")
+    [ "$result" = "True" ]
+}
+
+@test "rollback check hands over the narrow ops and the freshness data" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    ops=$(build "beta" "note" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
+    python3 -c "
+import json, sys
+print(json.dumps({'requestId': 'r', 'transactions': [{'id': 't', 'spaceId': sys.argv[2], 'operations': json.loads(sys.argv[1])}],
+                  'check': {'page': sys.argv[3], 'block': sys.argv[4], 'segments': []}}))
+" "$ops" "$SPACE" "55555555-5555-4555-8555-555555555555" "$BLOCK" > "$BATS_TEST_TMPDIR/rb.json"
+    result=$(check_rb | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+print([o['path'] for o in r['narrow_ops']], len(r['ops']), r['check']['block'] == '$BLOCK')")
+    [ "$result" = "[['discussions'], [], [], []] 5 True" ]
+}
+
+@test "rollback freshness: same segments are fresh, changed are stale, a missing block is unverified" {
+    run python3 - "$OPS_PY" "$BATS_TEST_TMPDIR" "$BLOCK" "$SPACE" <<'PY2'
+import json, subprocess, sys
+ops_py, tmp, block, space = sys.argv[1:5]
+page = "55555555-5555-4555-8555-555555555555"
+segs = [{"text": "alpha ", "type": 0, "enhancer": {}},
+        {"text": "beta", "type": 0, "enhancer": {}, "discussions": ["66666666-6666-4666-8666-666666666666"]}]
+op = {"id": block, "command": "update", "table": "block", "path": [], "args": {}}
+json.dump({"transactions": [{"spaceId": space, "operations": [op]}],
+           "check": {"page": page, "block": block, "segments": segs}}, open(tmp + "/rb.json", "w"))
+def doc(seg_list):
+    if seg_list is None:
+        return {"code": 500, "msg": "no rights"}
+    return {"data": {"blocks": {block: {"uuid": block, "data": {"segments": seg_list}}}}}
+got = []
+for d in (doc(segs), doc(segs + [{"text": " gamma", "type": 0, "enhancer": {}}]), doc(None)):
+    json.dump(d, open(tmp + "/doc.json", "w"))
+    run = subprocess.run([sys.executable, ops_py, "--rollback-fresh", "--", tmp + "/rb.json", tmp + "/doc.json"],
+                         capture_output=True, text=True)
+    got.append(run.stdout.strip())
+print(got)
+sys.exit(0 if got == ["fresh", "stale", "unverified"] else 1)
+PY2
     echo "$output"
     [ "$status" -eq 0 ]
 }

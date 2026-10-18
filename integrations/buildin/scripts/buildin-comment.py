@@ -51,6 +51,7 @@ Usage:
     buildin-comment.py --resolve=true|false -- <doc_json> <discussion_id>
     buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
     buildin-comment.py --check-rollback -- <rollback_file>
+    buildin-comment.py --rollback-fresh -- <rollback_file> <doc_json>
 
 <doc_json> — файл с ответом /api/docs (или «-» для stdin).
 --occurrence N — какое вхождение якоря выделить (1-based), когда их несколько.
@@ -574,8 +575,11 @@ def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None, ment
     # Узкий откат — когда блок уже переписал кто-то другой. Возвращать наши
     # сегменты там нельзя: в блоке лежат чужие, и восстановление снапшота
     # стёрло бы подсветку того, кто выиграл гонку.
+    # segments_after — какими наша запись оставит сегменты блока: по ним
+    # comment-rollback узнает, не правил ли блок кто-то ещё, прежде чем
+    # возвращать снапшот.
     return {"ops": ops, "rollback": rollback, "rollback_records": retire,
-            "discussion": discussion_id, "comment": comment_id}
+            "segments_after": new_segments, "discussion": discussion_id, "comment": comment_id}
 
 
 def read_block(doc, block_id):
@@ -769,7 +773,12 @@ def rollback_op_problem(op):
 
 
 def check_rollback(body):
-    """(spaceId, операции) из файла отката, либо RollbackError с причиной."""
+    """(spaceId, операции, сверка) из файла отката, либо RollbackError с причиной.
+
+    Сверка — служебный ключ check, который пишет comment: страница, блок и
+    сегменты блока после нашей записи. У отката ответа и у файлов, записанных
+    до неё, его нет.
+    """
     txs = body.get("transactions") if isinstance(body, dict) else None
     if not isinstance(txs, list) or len(txs) != 1 or not isinstance(txs[0], dict):
         raise RollbackError(
@@ -785,7 +794,25 @@ def check_rollback(body):
             raise RollbackError(
                 "операция [%d] не из отката команд комментариев: %s.\n  %s"
                 % (i, problem, json.dumps(op, ensure_ascii=False)[:300]))
-    return space, ops
+    check = body.get("check")
+    if check is not None and not (
+            isinstance(check, dict) and UUID_RE.match(str(check.get("page", "")))
+            and UUID_RE.match(str(check.get("block", ""))) and isinstance(check.get("segments"), list)):
+        raise RollbackError("служебный ключ check не по формату: нужны page, block и segments.")
+    return space, ops, check
+
+
+def rollback_freshness(check, doc):
+    """Можно ли вернуть снапшот блока — по ответу /api/docs его страницы.
+
+      fresh      — сегменты блока те же, что записал comment: снапшот можно вернуть;
+      stale      — блок меняли после нас: снапшот стёр бы чужие правки и подсветку;
+      unverified — блока в ответе нет: конверт ошибки, блок удалён или не та страница.
+    """
+    block = read_block(doc, check["block"])
+    if block is None:
+        return "unverified"
+    return "fresh" if ((block.get("data") or {}).get("segments") or []) == check["segments"] else "stale"
 
 
 # Режимы билдера: режим → число позиционных аргументов после «--».
@@ -797,6 +824,7 @@ ARITY = {
     "resolve": 2,          # <doc_json> <discussion_id>
     "resolve-verdict": 2,  # <after_json> <discussion_id>
     "check-rollback": 1,   # <rollback_file>
+    "rollback-fresh": 2,   # <rollback_file> <doc_json>
 }
 
 
@@ -812,7 +840,7 @@ def parse_args(argv):
             # дефисами («--force», «-- не согласен») не доходит до билдера
             # никакой формой ввода: они едут через argv, в том числе из @file.
             end_of_opts = True
-        elif a in ("--verdict", "--reply", "--reply-verdict", "--check-rollback"):
+        elif a in ("--verdict", "--reply", "--reply-verdict", "--check-rollback", "--rollback-fresh"):
             mode = a[2:]
         elif a.split("=", 1)[0] in ("--resolve", "--resolve-verdict"):
             flag, _, raw = a.partition("=")
@@ -893,8 +921,15 @@ def main():
             after_path, discussion_id = args
             print(resolve_verdict(load_doc(after_path), discussion_id, opts["resolved"]))
         elif mode == "check-rollback":
-            space, ops = check_rollback(load_doc(args[0]))
-            print(json.dumps({"space": space, "ops": ops}))
+            space, ops, check = check_rollback(load_doc(args[0]))
+            # Узкий откат — без возврата сегментов: только снять свой тред.
+            # Осиротевший id треда на сегменте Buildin не подсвечивает
+            # (проверено живьём), поэтому сегменты можно не трогать.
+            narrow = [op for op in ops if op.get("path") != ["data"]]
+            print(json.dumps({"space": space, "ops": ops, "narrow_ops": narrow, "check": check}))
+        elif mode == "rollback-fresh":
+            _, _, check = check_rollback(load_doc(args[0]))
+            print(rollback_freshness(check, load_doc(args[1])) if check else "no-check")
         else:
             # Без ensure_ascii=False: вывод разбирает json.load, ему \uXXXX всё
             # равно, а печать не-ASCII падает под не-UTF-8 локалью (LC_ALL=C).

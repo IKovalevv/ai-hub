@@ -39,8 +39,10 @@
 #                                                — закрыть тред (резолв); уже закрытый — без записи
 #   comment-unresolve <page_id|url> <discussion_id> [--dry-run]
 #                                                — открыть закрытый тред заново
-#   comment-rollback <file>                      — применить файл отката comment/comment-reply;
-#                                                  файл становится <file>.applied, повтор — отказ
+#   comment-rollback <file> [--narrow]           — применить файл отката comment/comment-reply;
+#                                                  файл становится <file>.applied, повтор — отказ;
+#                                                  блок меняли после комментария — полный откат
+#                                                  отвергается, --narrow снимает только свой тред
 #   publish-md <page_id> <file.md> [--replace]          — опубликовать markdown-файл
 #                                                        (по умолчанию дописывает в конец;
 #                                                         --replace заменяет содержимое)
@@ -123,7 +125,8 @@ parse_page_and_block_id() {
 # Флаги команд комментариев — один разбор на comment, comment-reply и
 # comment-resolve/unresolve: копии цикла разошлись бы молча. $1 — разрешённые
 # флаги через пробел, дальше аргументы команды. Выставляет DRY_RUN,
-# ROLLBACK_OUT, OCCURRENCE, массив MENTIONS и массив ARGS с позиционными.
+# ROLLBACK_OUT, OCCURRENCE, NARROW, массив MENTIONS и массив ARGS с
+# позиционными.
 #
 # Неизвестные «--»-токены отвергаются, а не сваливаются в позиционные: иначе
 # опечатка «--dryrun» молча делает боевую запись вместо превью. Флаг, который
@@ -135,6 +138,7 @@ parse_comment_flags() {
     DRY_RUN=""
     ROLLBACK_OUT=""
     OCCURRENCE=""
+    NARROW=""
     MENTIONS=()
     ARGS=()
     while [[ $# -gt 0 ]]; do
@@ -145,6 +149,7 @@ parse_comment_flags() {
         fi
         case "$1" in
             --dry-run)         DRY_RUN=1 ;;
+            --narrow)          NARROW=1 ;;
             --occurrence=*)    OCCURRENCE="${1#*=}" ;;
             --occurrence)      shift; OCCURRENCE="${1:-}"
                                [[ -n "$OCCURRENCE" && "$OCCURRENCE" != --* ]] || {
@@ -259,11 +264,22 @@ print(rec.get('spaceId', ''))
 
 # Файл отката — готовое тело запроса. Один на comment и comment-reply: права
 # и дефолтное имя у двух копий разошлись бы молча. $1 — spaceId, $2 — файл с
-# операциями отката. Путь — из ROLLBACK_OUT, а без него — свежий mktemp.
+# операциями отката, $3 (необязательный) — файл сверки для ключа check.
+# Путь — из ROLLBACK_OUT, а без него — свежий mktemp.
 write_rollback() {
     local body
     [[ -n "$ROLLBACK_OUT" ]] || ROLLBACK_OUT=$(mktemp "${TMPDIR:-/tmp}/buildin-rollback-XXXXXX")
     body=$(tx_body "$1" "$(cat "$2")") || return
+    if [[ -n "${3:-}" ]]; then
+        # Сверка едет в том же файле: отдельный файл рядом легко потерять, и
+        # откат тогда молча шёл бы без проверки свежести.
+        body=$(python3 -c "
+import json, sys
+body = json.loads(sys.argv[1])
+body['check'] = json.load(open(sys.argv[2], encoding='utf-8'))
+print(json.dumps(body))
+" "$body" "$3") || return
+    fi
     # umask 077 на подоболочку: дефолтный путь создаёт mktemp с правами 0600,
     # а перенаправление по --rollback-out дало бы права по umask, хотя в
     # файле лежит полный текст блока. У уже существующего файла права свои.
@@ -660,13 +676,15 @@ if segs(sys.argv[1]) != segs(sys.argv[2]):
         OPS_DIR=$(mktemp -d)
         DISCUSSION=$(echo "$BUILT" | python3 -c "
 import json, os, sys
-out = sys.argv[1]
+out, page, block = sys.argv[1:4]
 built = json.load(sys.stdin)
 for key in ('ops', 'rollback', 'rollback_records'):
     open(os.path.join(out, key + '.json'), 'w').write(json.dumps(built[key]))
+open(os.path.join(out, 'check.json'), 'w').write(json.dumps(
+    {'page': page, 'block': block, 'segments': built['segments_after']}))
 print(built['discussion'])
-" "$OPS_DIR")
-        write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json"
+" "$OPS_DIR" "$PAGE_ID" "$BLOCK_ID")
+        write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json" "$OPS_DIR/check.json"
 
         # О созданном треде сообщаем ДО записи: id известен сразу после билдера,
         # а если POST оборвётся, узнать его будет неоткуда — curl в buildin.sh
@@ -906,11 +924,14 @@ print(built['comment'])
         ;;
 
     comment-rollback)
-        USAGE='Usage: comment-rollback <file>
+        USAGE='Usage: comment-rollback <file> [--narrow]
   <file>: файл отката из stderr comment или comment-reply («Откат: <путь>»)
+  --narrow: снять только свой тред, не возвращая сегменты блока — для блока,
+            который изменился после комментария (полный откат тогда отвергается)
   после применения файл переименовывается в <file>.applied — повтор отвергается'
-        FILE="${1:-}"
-        [[ -n "$FILE" && $# -eq 1 ]] || { echo "$USAGE" >&2; exit 1; }
+        parse_comment_flags "narrow" "$@"
+        FILE="${ARGS[0]:-}"
+        [[ -n "$FILE" && ${#ARGS[@]} -eq 1 ]] || { echo "$USAGE" >&2; exit 1; }
         # Применённый откат второй раз не применяется: полный откат снова вернул
         # бы блок к старому снапшоту и стёр бы подсветку тех, кто успел
         # прокомментировать после первого применения.
@@ -921,9 +942,55 @@ print(built['comment'])
             exit 1
         fi
 
+        RB_DIR=$(mktemp -d)
+        trap 'rm -rf "$RB_DIR"' EXIT
         CHECKED=$(python3 "$SCRIPT_DIR/buildin-comment.py" --check-rollback -- "$FILE")
-        SPACE_ID=$(echo "$CHECKED" | python3 -c "import json, sys; print(json.load(sys.stdin)['space'])")
-        OPS=$(echo "$CHECKED" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['ops']))")
+        echo "$CHECKED" | python3 -c "
+import json, os, sys
+c, out = json.load(sys.stdin), sys.argv[1]
+open(os.path.join(out, 'space'), 'w').write(c['space'])
+open(os.path.join(out, 'ops'), 'w').write(json.dumps(c['ops']))
+open(os.path.join(out, 'narrow_ops'), 'w').write(json.dumps(c['narrow_ops']))
+open(os.path.join(out, 'page'), 'w').write((c['check'] or {}).get('page', ''))
+open(os.path.join(out, 'restores'), 'w').write('1' if c['ops'] != c['narrow_ops'] else '')
+" "$RB_DIR"
+        SPACE_ID=$(cat "$RB_DIR/space")
+        OPS=$(cat "$RB_DIR/ops")
+        CHECK_PAGE=$(cat "$RB_DIR/page")
+
+        if [[ -n "$NARROW" ]]; then
+            OPS=$(cat "$RB_DIR/narrow_ops")
+        elif [[ -n "$(cat "$RB_DIR/restores")" ]]; then
+            # Полный откат возвращает снапшот сегментов. Если блок меняли после
+            # нашего комментария, снапшот стёр бы чужие правки и подсветку,
+            # поэтому сначала сверка: блок должен быть ровно таким, каким его
+            # оставила наша запись.
+            if [[ -z "$CHECK_PAGE" ]]; then
+                echo "ВНИМАНИЕ: в файле нет данных для сверки с блоком — сегменты вернутся без проверки свежести." >&2
+            else
+                if ! buildin GET "/api/docs/$CHECK_PAGE" > "$RB_DIR/doc.json"; then
+                    echo "Error: не удалось прочитать страницу, чтобы сверить блок с файлом отката — откат не применён." >&2
+                    exit 1
+                fi
+                # Применяем только при явном fresh: сбой сверки не должен
+                # превращаться в откат вслепую.
+                FRESH=$(python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-fresh -- "$FILE" "$RB_DIR/doc.json")
+                case "$FRESH" in
+                    fresh) ;;
+                    stale)
+                        echo "Error: блок изменился после комментария — полный откат вернул бы старый снапшот" >&2
+                        echo "       и стёр чужие правки и подсветку. Откат не применён." >&2
+                        echo "       Снять только свой тред, не трогая сегменты: buildin-pages.sh comment-rollback $FILE --narrow" >&2
+                        exit 1
+                        ;;
+                    *)
+                        echo "Error: блока из файла отката нет на странице — сверить не с чем, откат не применён." >&2
+                        echo "       Снять только свой тред: buildin-pages.sh comment-rollback $FILE --narrow" >&2
+                        exit 1
+                        ;;
+                esac
+            fi
+        fi
 
         # Конверт собирается заново общим transaction(): в сеть уходит одна
         # форма тела, а из файла берётся только то, что проверено по операциям.
