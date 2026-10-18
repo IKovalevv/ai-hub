@@ -436,6 +436,27 @@ else
     fail "файл без сверки применён (rc=$RC2): $(stderr | head -2)"
 fi
 
+# В тред, который откатываем, успел ответить другой человек: откат погасил
+# бы и его ответ. Отказ с подсказкой закрыть тред — и для полного, и для --narrow.
+RB="$TMP/rb-foreign-reply.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+D=$(stdout | sed -n 's/^discussion: //p')
+python3 -c "
+import json
+s = json.load(open('$TMP/state.json'))
+s['data']['discussions']['$D']['comments'].append('$OTHER')
+s['data']['comments']['$OTHER'] = {'uuid': '$OTHER', 'createdBy': '$OTHER', 'status': 1}
+json.dump(s, open('$TMP/state.json', 'w'))"
+for MODE in full --narrow; do
+    RC2=$(run_sub comment-rollback "$RB" ${MODE#full})
+    if [ "$RC" -eq 0 ] && [ "$RC2" -eq 1 ] && ! sent && [ -e "$RB" ] \
+       && stderr | grep -q 'помимо вашего' && stderr | grep -q "comment-resolve $PAGE $D"; then
+        ok "в треде чужой ответ — откат ($MODE) не применён, предложен comment-resolve"
+    else
+        fail "откат треда с чужим ответом ($MODE, rc=$RC2): $(stderr | head -3)"
+    fi
+done
+
 RB="$TMP/rb-reply-apply.json"
 write_thread_fixture false
 RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' "--rollback-out=$RB")

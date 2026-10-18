@@ -34,7 +34,8 @@
 #   comment-rollback <file> [--narrow]           — применить файл отката comment/comment-reply;
 #                                                  файл становится <file>.applied, повтор — отказ;
 #                                                  блок меняли после комментария — полный откат
-#                                                  отвергается, --narrow снимает только свой тред
+#                                                  отвергается, --narrow снимает только свой тред;
+#                                                  в треде чужой ответ или записи не ваши — отказ
 
 # pipefail обязателен вместе с JSON-отказом из buildin.sh: без него сбой клиента
 # в конвейере `buildin ... | python3` маскируется нулевым статусом питона,
@@ -536,10 +537,12 @@ built = json.load(sys.stdin)
 for key in ('ops', 'rollback'):
     open(os.path.join(out, key + '.json'), 'w').write(json.dumps(built[key]))
 open(os.path.join(out, 'space'), 'w').write(built['space'])
+# Сверка — страница: по ней comment-rollback проверит, что гасит именно ваш ответ.
+open(os.path.join(out, 'check.json'), 'w').write(json.dumps({'page': sys.argv[2]}))
 print(built['comment'])
-" "$OPS_DIR")
+" "$OPS_DIR" "$PAGE_ID")
         SPACE_ID=$(cat "$OPS_DIR/space")
-        write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json"
+        write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json" "$OPS_DIR/check.json"
 
         # id ответа — до записи, по той же причине, что у comment: если POST
         # оборвётся, узнать его будет неоткуда, а слепой повтор задвоит ответ.
@@ -640,6 +643,7 @@ print(built['comment'])
   <file>: файл отката из stderr comment или comment-reply («Откат: <путь>»)
   --narrow: снять только свой тред, не возвращая сегменты блока — для блока,
             который изменился после комментария (полный откат тогда отвергается)
+  в треде есть чужие ответы или записи из файла не ваши — отказ: откат погасил бы чужое
   после применения файл переименовывается в <file>.applied — повтор отвергается'
         parse_comment_flags "narrow" "$@"
         FILE="${ARGS[0]:-}"
@@ -656,49 +660,36 @@ print(built['comment'])
 
         RB_DIR=$(mktemp -d)
         trap 'rm -rf "$RB_DIR"' EXIT
+        # Сначала файл без сети: подложенный или битый отвергается до запросов.
         CHECKED=$(python3 "$SCRIPT_DIR/buildin-comment.py" --check-rollback -- "$FILE")
-        echo "$CHECKED" | python3 -c "
+        CHECK_PAGE=$(echo "$CHECKED" | python3 -c "import json, sys; print((json.load(sys.stdin)['check'] or {}).get('page', ''))")
+
+        # Решает план отката: он сверяет файл с текущей страницей — чьи записи
+        # гасятся, нет ли в треде чужих ответов, не меняли ли блок. Файл без
+        # сверки читать не с чем: пустой документ, и план его отвергнет.
+        echo '{}' > "$RB_DIR/doc.json"
+        if [[ -n "$CHECK_PAGE" ]] && ! buildin GET "/api/docs/$CHECK_PAGE" > "$RB_DIR/doc.json"; then
+            echo "Error: не удалось прочитать страницу из файла отката, чтобы сверить его с ней — откат не применён." >&2
+            exit 1
+        fi
+        USER_ID=$(get_user_id)
+        PLAN=$(python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-plan ${NARROW:+--narrow} --user="$USER_ID" -- \
+            "$FILE" "$RB_DIR/doc.json")
+        # Отказ плана — код 1: ничего не отправлено. Применяем только при явном
+        # apply: сбой плана не должен превращаться в откат вслепую.
+        echo "$PLAN" | python3 -c "
 import json, os, sys
-c, out = json.load(sys.stdin), sys.argv[1]
-open(os.path.join(out, 'space'), 'w').write(c['space'])
-open(os.path.join(out, 'ops'), 'w').write(json.dumps(c['ops']))
-open(os.path.join(out, 'narrow_ops'), 'w').write(json.dumps(c['narrow_ops']))
-open(os.path.join(out, 'page'), 'w').write((c['check'] or {}).get('page', ''))
-open(os.path.join(out, 'restores'), 'w').write('1' if c['ops'] != c['narrow_ops'] else '')
+plan, out = json.load(sys.stdin), sys.argv[1]
+if plan['apply'] is not True:
+    sys.stderr.write('Error: %s Откат не применён.\\n' % plan['reason'])
+    if plan['hint']:
+        sys.stderr.write('       %s\\n' % plan['hint'])
+    sys.exit(1)
+open(os.path.join(out, 'space'), 'w').write(plan['space'])
+open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
 " "$RB_DIR"
         SPACE_ID=$(cat "$RB_DIR/space")
         OPS=$(cat "$RB_DIR/ops")
-        CHECK_PAGE=$(cat "$RB_DIR/page")
-
-        if [[ -n "$NARROW" ]]; then
-            OPS=$(cat "$RB_DIR/narrow_ops")
-        elif [[ -n "$(cat "$RB_DIR/restores")" ]]; then
-            # Полный откат возвращает снапшот сегментов. Если блок меняли после
-            # нашего комментария, снапшот стёр бы чужие правки и подсветку,
-            # поэтому сначала сверка: блок должен быть ровно таким, каким его
-            # оставила наша запись.
-            if ! buildin GET "/api/docs/$CHECK_PAGE" > "$RB_DIR/doc.json"; then
-                echo "Error: не удалось прочитать страницу, чтобы сверить блок с файлом отката — откат не применён." >&2
-                exit 1
-            fi
-            # Применяем только при явном fresh: сбой сверки не должен
-            # превращаться в откат вслепую.
-            FRESH=$(python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-fresh -- "$FILE" "$RB_DIR/doc.json")
-            case "$FRESH" in
-                fresh) ;;
-                stale)
-                    echo "Error: блок изменился после комментария — полный откат вернул бы старый снапшот" >&2
-                    echo "       и стёр чужие правки и подсветку. Откат не применён." >&2
-                    echo "       Снять только свой тред, не трогая сегменты: buildin-pages.sh comment-rollback $FILE --narrow" >&2
-                    exit 1
-                    ;;
-                *)
-                    echo "Error: блока из файла отката нет на странице — сверить не с чем, откат не применён." >&2
-                    echo "       Снять только свой тред: buildin-pages.sh comment-rollback $FILE --narrow" >&2
-                    exit 1
-                    ;;
-            esac
-        fi
 
         # Конверт собирается заново общим transaction(): в сеть уходит одна
         # форма тела, а из файла берётся только то, что проверено по операциям.

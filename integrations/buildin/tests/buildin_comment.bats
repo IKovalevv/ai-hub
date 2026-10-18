@@ -853,6 +853,8 @@ cases = [
     (tx([{"id": d, "command": "update", "table": "discussion", "path": [], "args": {"status": 1}}]),
      "только гасит"),
     (dict(tx([ok_op]), check={"page": "x"}), "check не по формату"),
+    (dict(tx([ok_op]), check={"page": page, "block": block}), "check не по формату"),
+    (dict(tx([ok_op]), check={"page": page, "segments": []}), "check не по формату"),
     # подложенные файлы: архивация страницы и чужой текст в блок
     (tx([dict(ok_op, args={"status": -1})]), "update блока меняет не только метки времени"),
     (tx([dict(ok_op, args={"title": "x"})]), "update блока меняет не только метки времени"),
@@ -881,42 +883,90 @@ PY
     [ "$result" = "True" ]
 }
 
-@test "rollback check hands over the narrow ops and the freshness data" {
-    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
-    built=$(build "beta" "note")
-    ops=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
-    after=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['segments_after']))")
-    mkrollback "$ops" "{\"page\": \"55555555-5555-4555-8555-555555555555\", \"block\": \"$BLOCK\", \"segments\": $after}"
-    result=$(check_rb | python3 -c "
-import json, sys
-r = json.load(sys.stdin)
-print([o['path'] for o in r['narrow_ops']], len(r['ops']), r['check']['block'] == '$BLOCK')")
-    [ "$result" = "[['discussions'], [], [], []] 5 True" ]
+# План отката: файл, текущая страница и пользователь → применить или отказать.
+# Каждый случай — отдельный прогон --rollback-plan с ожидаемым итогом.
+plan_cases() { # $1 — какой набор случаев
+    python3 - "$OPS_PY" "$BATS_TEST_TMPDIR" "$BLOCK" "$SPACE" "$1" <<'PY2'
+import copy, json, subprocess, sys
+ops_py, tmp, block, space, which = sys.argv[1:6]
+page, me, other = "55555555-5555-4555-8555-555555555555", "77777777-0000-4000-8000-000000000001", "77777777-0000-4000-8000-000000000002"
+D, C1, C2 = "66666666-6666-4666-8666-666666666666", "88888888-8888-4888-8888-888888888881", "88888888-8888-4888-8888-888888888882"
+snap = [{"text": "alpha beta", "type": 0, "enhancer": {}}]
+after = [{"text": "alpha ", "type": 0, "enhancer": {}}, {"text": "beta", "type": 0, "enhancer": {}, "discussions": [D]}]
+def touch(table, rid, status=False):
+    args = {"updatedAt": 1, "updatedBy": me}
+    if status:
+        args["status"] = -1
+    return {"id": rid, "command": "update", "table": table, "path": [], "args": args}
+comment_ops = [{"id": block, "command": "update", "table": "block", "path": ["data"], "args": {"segments": snap}},
+               {"id": block, "command": "listRemove", "table": "block", "path": ["discussions"], "args": {"uuid": D}},
+               touch("comment", C1, True), touch("discussion", D, True), touch("block", block)]
+reply_ops = [{"id": D, "command": "listRemove", "table": "discussion", "path": ["comments"], "args": {"uuid": C2}},
+             touch("comment", C2, True)]
+def body(ops, check):
+    b = {"transactions": [{"spaceId": space, "operations": ops}]}
+    if check is not None:
+        b["check"] = check
+    return b
+def doc(segments=after, thread_by=me, comments=(C1,), extra=None, with_block=True, with_records=True):
+    msgs = {C1: {"uuid": C1, "createdBy": me, "status": 1}}
+    msgs.update(extra or {})
+    data = {"blocks": {block: {"uuid": block, "discussions": [D], "data": {"segments": segments}}} if with_block else {}}
+    if with_records:
+        data["discussions"] = {D: {"uuid": D, "createdBy": thread_by, "comments": list(comments)}}
+        data["comments"] = msgs
+    return {"data": data}
+full_check = {"page": page, "block": block, "segments": after}
+cases = {
+  "comment": [
+    ("fresh, no replies -> full", body(comment_ops, full_check), doc(), [], True, 5, ""),
+    ("narrow drops the segments", body(comment_ops, full_check), doc(), ["--narrow"], True, 4, ""),
+    ("stale -> refuse, hint narrow", body(comment_ops, full_check), doc(segments=snap), [], False, 0, "--narrow"),
+    ("stale, narrow -> ok without segments", body(comment_ops, full_check), doc(segments=snap), ["--narrow"], True, 4, ""),
+    ("block missing -> refuse", body(comment_ops, full_check), doc(with_block=False), [], False, 0, "--narrow"),
+    ("live foreign reply -> refuse", body(comment_ops, full_check),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), [], False, 0, "comment-resolve"),
+    ("live foreign reply, narrow too", body(comment_ops, full_check),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), ["--narrow"], False, 0, "comment-resolve"),
+    ("retired foreign reply -> ok", body(comment_ops, full_check),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": -1}}), [], True, 5, ""),
+    ("thread by someone else -> refuse", body(comment_ops, full_check), doc(thread_by=other), [], False, 0, ""),
+    ("records gone -> refuse", body(comment_ops, full_check), doc(with_records=False), [], False, 0, ""),
+  ],
+  "reply": [
+    ("own reply -> ok", body(reply_ops, {"page": page}),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": me, "status": 1}}), [], True, 2, ""),
+    ("someone else's reply -> refuse", body(reply_ops, {"page": page}),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), [], False, 0, ""),
+    ("no check -> refuse", body(reply_ops, None),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": me, "status": 1}}), [], False, 0, ""),
+  ],
+}[which]
+bad = []
+for name, b, d, flags, want_apply, want_ops, want_hint in cases:
+    json.dump(b, open(tmp + "/rb.json", "w")); json.dump(d, open(tmp + "/doc.json", "w"))
+    run = subprocess.run([sys.executable, ops_py, "--rollback-plan", "--user=" + me] + flags + ["--", tmp + "/rb.json", tmp + "/doc.json"],
+                         capture_output=True, text=True)
+    try:
+        plan = json.loads(run.stdout)
+    except ValueError:
+        bad.append((name, "no plan", run.stderr.strip()[:200])); continue
+    if (plan["apply"], len(plan["ops"])) != (want_apply, want_ops) or want_hint not in plan["hint"]:
+        bad.append((name, plan["apply"], len(plan["ops"]), plan["reason"][:90], plan["hint"][:60]))
+for x in bad:
+    print("WRONG PLAN:", x)
+sys.exit(1 if bad else 0)
+PY2
 }
 
-@test "rollback freshness: same segments are fresh, changed are stale, a missing block is unverified" {
-    run python3 - "$OPS_PY" "$BATS_TEST_TMPDIR" "$BLOCK" "$SPACE" <<'PY2'
-import json, subprocess, sys
-ops_py, tmp, block, space = sys.argv[1:5]
-page = "55555555-5555-4555-8555-555555555555"
-segs = [{"text": "alpha ", "type": 0, "enhancer": {}},
-        {"text": "beta", "type": 0, "enhancer": {}, "discussions": ["66666666-6666-4666-8666-666666666666"]}]
-op = {"id": block, "command": "update", "table": "block", "path": [], "args": {}}
-json.dump({"transactions": [{"spaceId": space, "operations": [op]}],
-           "check": {"page": page, "block": block, "segments": segs}}, open(tmp + "/rb.json", "w"))
-def doc(seg_list):
-    if seg_list is None:
-        return {"code": 500, "msg": "no rights"}
-    return {"data": {"blocks": {block: {"uuid": block, "data": {"segments": seg_list}}}}}
-got = []
-for d in (doc(segs), doc(segs + [{"text": " gamma", "type": 0, "enhancer": {}}]), doc(None)):
-    json.dump(d, open(tmp + "/doc.json", "w"))
-    run = subprocess.run([sys.executable, ops_py, "--rollback-fresh", "--", tmp + "/rb.json", tmp + "/doc.json"],
-                         capture_output=True, text=True)
-    got.append(run.stdout.strip())
-print(got)
-sys.exit(0 if got == ["fresh", "stale", "unverified"] else 1)
-PY2
+@test "rollback plan for a comment: replies, authorship, freshness and narrow" {
+    run plan_cases comment
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "rollback plan for a reply: only your own message, and only with a check" {
+    run plan_cases reply
     echo "$output"
     [ "$status" -eq 0 ]
 }

@@ -51,7 +51,7 @@ Usage:
     buildin-comment.py --resolve=true|false -- <doc_json> <discussion_id>
     buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
     buildin-comment.py --check-rollback -- <rollback_file>
-    buildin-comment.py --rollback-fresh -- <rollback_file> <doc_json>
+    buildin-comment.py --rollback-plan [--narrow] --user=<uuid> -- <rollback_file> <doc_json>
 
 <doc_json> — файл с ответом /api/docs (или «-» для stdin).
 --occurrence N — какое вхождение якоря выделить (1-based), когда их несколько.
@@ -783,9 +783,8 @@ def rollback_op_problem(op):
 def check_rollback(body):
     """(spaceId, операции, сверка) из файла отката, либо RollbackError с причиной.
 
-    Сверка — служебный ключ check, который пишет comment: страница, блок и
-    сегменты блока после нашей записи. У отката ответа и у файлов, записанных
-    до неё, его нет.
+    Сверка — служебный ключ check: страница, а у отката comment ещё блок и
+    его сегменты после нашей записи. У файлов, записанных до сверки, его нет.
     """
     txs = body.get("transactions") if isinstance(body, dict) else None
     if not isinstance(txs, list) or len(txs) != 1 or not isinstance(txs[0], dict):
@@ -805,8 +804,9 @@ def check_rollback(body):
     check = body.get("check")
     if check is not None and not (
             isinstance(check, dict) and UUID_RE.match(str(check.get("page", "")))
-            and UUID_RE.match(str(check.get("block", ""))) and isinstance(check.get("segments"), list)):
-        raise RollbackError("служебный ключ check не по формату: нужны page, block и segments.")
+            and (("block" not in check and "segments" not in check)
+                 or (UUID_RE.match(str(check.get("block", ""))) and isinstance(check.get("segments"), list)))):
+        raise RollbackError("служебный ключ check не по формату: нужна page, а block и segments — вместе.")
     for op in ops:
         if op.get("path") == ["data"]:
             check_segments_restore(op, check)
@@ -822,7 +822,7 @@ def check_segments_restore(op, check):
     текст не трогает. Поэтому без сверки возврат не применяется вовсе, а со
     сверкой — только тому же блоку и только с тем же видимым текстом.
     """
-    if check is None:
+    if check is None or "block" not in check:
         raise RollbackError(
             "возврат сегментов без сверки (ключ check) не применяется: сверить блок и "
             "текст не с чем. Файл записан до появления сверки — посмотрите блок и при "
@@ -846,6 +846,64 @@ def rollback_freshness(check, doc):
     if block is None:
         return "unverified"
     return "fresh" if ((block.get("data") or {}).get("segments") or []) == check["segments"] else "stale"
+
+
+def rollback_plan(body, doc, user_id, narrow, path):
+    """Что отправить на откат и можно ли: по файлу, текущей странице и пользователю.
+
+    Возвращает dict(apply, reason, hint, space, ops). Отказ — когда откат
+    стёр бы чужое:
+      - записей из файла на странице нет — проверить нечего;
+      - гасимые записи созданы не вами — так подложенный файл погасил бы
+        чужой тред;
+      - в гасимом треде есть живые сообщения, кроме вашего: тред гасится
+        целиком, и ответ коллеги пропал бы молча. Сегменты на это не
+        реагируют, поэтому сверка свежести такого не видит;
+      - полный откат, а блок с тех пор меняли или его нет.
+    Проверки ответов и авторства идут и для --narrow: он тоже гасит тред.
+    """
+    space, ops, check = check_rollback(body)
+
+    def refuse(reason, hint=""):
+        return {"apply": False, "reason": reason, "hint": hint, "space": space, "ops": []}
+
+    if check is None:
+        return refuse("в файле нет сверки (ключ check): он записан до неё, и проверить на странице нечего.")
+    data = (doc.get("data") if isinstance(doc, dict) else None) or {}
+    tables = {"discussion": data.get("discussions") or {}, "comment": data.get("comments") or {}}
+    retired = [(op["table"], op["id"]) for op in ops
+               if op["command"] == "update" and op["path"] == [] and op["args"].get("status") == -1]
+    missing = [rid for table, rid in retired if rid not in tables[table]]
+    if missing:
+        return refuse("записей из файла на странице нет (%s): откат уже применён или страница не та."
+                      % ", ".join(missing))
+    foreign = [rid for table, rid in retired if tables[table][rid].get("createdBy") != user_id]
+    if foreign:
+        return refuse("в файле чужие записи (%s): откат гасит только созданное вами." % ", ".join(foreign))
+    ours = {rid for table, rid in retired if table == "comment"}
+    for table, rid in retired:
+        if table != "discussion":
+            continue
+        live = [c for c in tables["discussion"][rid].get("comments") or []
+                if c not in ours and (tables["comment"].get(c) or {}).get("status") != -1]
+        if live:
+            return refuse(
+                "в треде %s есть сообщения помимо вашего (%d): откат погасил бы их вместе с тредом."
+                % (rid, len(live)),
+                "Закрыть тред, сохранив обсуждение: buildin-pages.sh comment-resolve %s %s"
+                % (check["page"], rid))
+    if not narrow and any(op["path"] == ["data"] for op in ops):
+        fresh = rollback_freshness(check, doc)
+        if fresh != "fresh":
+            reason = ("блок изменился после комментария — полный откат вернул бы старый снапшот "
+                      "и стёр чужие правки и подсветку." if fresh == "stale"
+                      else "блока из файла отката нет на странице — сверить не с чем.")
+            return refuse(reason, "Снять только свой тред, не трогая сегменты: "
+                                  "buildin-pages.sh comment-rollback %s --narrow" % path)
+    # Узкий откат — без возврата сегментов. Осиротевший id треда на сегменте
+    # Buildin не подсвечивает (проверено живьём), поэтому их можно не трогать.
+    chosen = [op for op in ops if op["path"] != ["data"]] if narrow else ops
+    return {"apply": True, "reason": "", "hint": "", "space": space, "ops": chosen}
 
 
 def load_doc(path):
@@ -920,17 +978,14 @@ def run_resolve_verdict(args, opts):
 
 
 def run_check_rollback(args, opts):
+    # Проверка файла без сети: подложенный или битый отвергается до запросов.
     space, ops, check = check_rollback(load_doc(args[0]))
-    # Узкий откат — без возврата сегментов: только снять свой тред.
-    # Осиротевший id треда на сегменте Buildin не подсвечивает
-    # (проверено живьём), поэтому сегменты можно не трогать.
-    narrow = [op for op in ops if op.get("path") != ["data"]]
-    print(json.dumps({"space": space, "ops": ops, "narrow_ops": narrow, "check": check}))
+    print(json.dumps({"space": space, "ops": ops, "check": check}))
 
 
-def run_rollback_fresh(args, opts):
-    _, _, check = check_rollback(load_doc(args[0]))
-    print(rollback_freshness(check, load_doc(args[1])) if check else "no-check")
+def run_rollback_plan(args, opts):
+    print(json.dumps(rollback_plan(load_doc(args[0]), load_doc(args[1]), opts["user"],
+                                   opts["narrow"], args[0])))
 
 
 # Режимы билдера — одной таблицей: режим → (число позиционных после «--»,
@@ -945,14 +1000,15 @@ MODES = {
     "resolve": (2, run_resolve, True),                  # <doc_json> <discussion_id>
     "resolve-verdict": (2, run_resolve_verdict, True),  # <after_json> <discussion_id>
     "check-rollback": (1, run_check_rollback, False),   # <rollback_file>
-    "rollback-fresh": (2, run_rollback_fresh, False),   # <rollback_file> <doc_json>
+    "rollback-plan": (2, run_rollback_plan, False),     # <rollback_file> <doc_json>
 }
 
 
 def parse_args(argv):
     """(режим, позиционные, опции); ошибка разбора — SystemExit с причиной."""
     positional, end_of_opts, mode = [], False, "build"
-    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None, "page": None}
+    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None, "page": None,
+            "narrow": False, "user": None}
     for a in argv:
         flag, has_value, raw = a.partition("=")
         if end_of_opts or not a.startswith("--"):
@@ -976,8 +1032,10 @@ def parse_args(argv):
             opts["occurrence"] = int(raw)
         elif flag == "--mention" and has_value:
             opts["mentions"].append(raw)
-        elif flag in ("--members", "--page") and has_value:
+        elif flag in ("--members", "--page", "--user") and has_value:
             opts[flag[2:]] = raw
+        elif a == "--narrow":
+            opts["narrow"] = True
         else:
             raise SystemExit("Error: неизвестный флаг: %s" % a)
     if len(positional) != MODES[mode][0]:
