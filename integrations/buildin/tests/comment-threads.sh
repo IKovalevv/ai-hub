@@ -472,10 +472,16 @@ else
 fi
 
 # --dry-run: те же сверки, вывод — операции, без записи и без .applied.
+# Превью читаемое и при не-UTF-8 выводе: кириллица текстом, а не \uXXXX.
+# Не-UTF-8 вывод — через PYTHONIOENCODING: под LC_ALL=C Python 3.7+ сам
+# переключается на UTF-8, и поломка печати не воспроизвелась бы.
 RB="$TMP/rb-dry.json"
 RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
 for MODE in full --narrow; do
-    RC2=$(run_sub comment-rollback "$RB" --dry-run ${MODE#full})
+    RC2=$(PYTHONIOENCODING=ascii run_sub comment-rollback "$RB" --dry-run ${MODE#full})
+    if [ "$MODE" = full ] && ! stdout | grep -q 'безлимитный'; then
+        fail "comment-rollback --dry-run печатает кириллицу нечитаемо: $(stdout | grep -m1 text)"
+    fi
     if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && ! sent && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && stdout | python3 -c "
 import json, sys
 ops = json.load(sys.stdin)
@@ -552,12 +558,38 @@ json.dump(s, open('$TMP/state.json', 'w'))"
 for MODE in full --narrow; do
     RC2=$(run_sub comment-rollback "$RB" ${MODE#full})
     if [ "$RC" -eq 0 ] && [ "$RC2" -eq 1 ] && ! sent && [ -e "$RB" ] \
-       && stderr | grep -q 'помимо вашего' && stderr | grep -q "comment-resolve $PAGE $D"; then
+       && stderr | grep -q 'чужие сообщения' && stderr | grep -q "comment-resolve $PAGE $D"; then
         ok "в треде чужой ответ — откат ($MODE) не применён, предложен comment-resolve"
     else
         fail "откат треда с чужим ответом ($MODE, rc=$RC2): $(stderr | head -3)"
     fi
 done
+
+# Свой ответ в свой тред — сценарий с живой страницы: отказ ведёт к откату
+# ответа его файлом, а после него тред откатывается целиком.
+RB="$TMP/rb-own-thread.json"; RB_R="$TMP/rb-own-reply.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+D=$(stdout | sed -n 's/^discussion: //p')
+RC2=$(run_sub comment-reply "$PAGE" "$D" 'свой ответ' "--rollback-out=$RB_R")
+RC3=$(run_sub comment-rollback "$RB")
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 1 ] && ! sent && [ -e "$RB" ] \
+   && stderr | grep -q 'ваши ответы' && stderr | grep -q 'rollback:'; then
+    ok "в треде свой ответ — отказ с подсказкой откатить сначала ответ"
+else
+    fail "откат треда со своим ответом (rc=$RC3): $(stderr | head -3)"
+fi
+RC4=$(run_sub comment-rollback "$RB_R")
+RC5=$(run_sub comment-rollback "$RB")
+ST=$(block_state)
+if [ "$RC4" -eq 0 ] && [ "$RC5" -eq 0 ] && echo "$ST" | python3 -c "
+import json, sys
+st = json.load(sys.stdin)
+assert st['listed'] == [] and st['lit'] == [] and st['n'] == 3, st
+" 2>/dev/null; then
+    ok "ответ откатан своим файлом — после него тред откатывается целиком"
+else
+    fail "откат ответа, потом треда (rc=$RC4/$RC5): $ST $(stderr | head -2)"
+fi
 
 RB="$TMP/rb-reply-apply.json"
 write_thread_fixture false

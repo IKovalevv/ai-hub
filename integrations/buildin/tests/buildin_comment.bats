@@ -891,6 +891,7 @@ import copy, json, subprocess, sys
 ops_py, tmp, block, space, which = sys.argv[1:6]
 page, me, other = "55555555-5555-4555-8555-555555555555", "77777777-0000-4000-8000-000000000001", "77777777-0000-4000-8000-000000000002"
 D, C1, C2 = "66666666-6666-4666-8666-666666666666", "88888888-8888-4888-8888-888888888881", "88888888-8888-4888-8888-888888888882"
+C3 = "88888888-8888-4888-8888-888888888883"
 snap = [{"text": "alpha beta", "type": 0, "enhancer": {}}]
 after = [{"text": "alpha ", "type": 0, "enhancer": {}}, {"text": "beta", "type": 0, "enhancer": {}, "discussions": [D]}]
 def touch(table, rid, status=False):
@@ -925,9 +926,18 @@ cases = {
     ("stale, narrow -> ok without segments", body(comment_ops, full_check), doc(segments=snap), ["--narrow"], True, 4, ""),
     ("block missing -> refuse", body(comment_ops, full_check), doc(with_block=False), [], False, 0, "--narrow"),
     ("live foreign reply -> refuse", body(comment_ops, full_check),
-     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), [], False, 0, "comment-resolve"),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), [], False, 0, "comment-resolve",
+     "чужие сообщения"),
     ("live foreign reply, narrow too", body(comment_ops, full_check),
-     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), ["--narrow"], False, 0, "comment-resolve"),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), ["--narrow"], False, 0, "comment-resolve",
+     "чужие сообщения"),
+    ("own live reply -> roll it back first", body(comment_ops, full_check),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": me, "status": 1}}), [], False, 0, "откатите ответы",
+     "ваши ответы"),
+    ("own and foreign replies -> the foreign one decides", body(comment_ops, full_check),
+     doc(comments=(C1, C2, C3), extra={C2: {"uuid": C2, "createdBy": me, "status": 1},
+                                       C3: {"uuid": C3, "createdBy": other, "status": 1}}), [], False, 0, "comment-resolve",
+     "чужие сообщения (1)"),
     ("retired foreign reply -> ok", body(comment_ops, full_check),
      doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": -1}}), [], True, 5, ""),
     ("thread by someone else -> refuse", body(comment_ops, full_check), doc(thread_by=other), [], False, 0, ""),
@@ -943,7 +953,7 @@ cases = {
   ],
 }[which]
 bad = []
-for name, b, d, flags, want_apply, want_ops, want_hint in cases:
+for name, b, d, flags, want_apply, want_ops, want_hint, *want_reason in cases:
     json.dump(b, open(tmp + "/rb.json", "w")); json.dump(d, open(tmp + "/doc.json", "w"))
     run = subprocess.run([sys.executable, ops_py, "--rollback-plan", "--user=" + me] + flags + ["--", tmp + "/rb.json", tmp + "/doc.json"],
                          capture_output=True, text=True)
@@ -951,7 +961,8 @@ for name, b, d, flags, want_apply, want_ops, want_hint in cases:
         plan = json.loads(run.stdout)
     except ValueError:
         bad.append((name, "no plan", run.stderr.strip()[:200])); continue
-    if (plan["apply"], len(plan["ops"])) != (want_apply, want_ops) or want_hint not in plan["hint"]:
+    if ((plan["apply"], len(plan["ops"])) != (want_apply, want_ops) or want_hint not in plan["hint"]
+            or (want_reason and want_reason[0] not in plan["reason"])):
         bad.append((name, plan["apply"], len(plan["ops"]), plan["reason"][:90], plan["hint"][:60]))
 for x in bad:
     print("WRONG PLAN:", x)

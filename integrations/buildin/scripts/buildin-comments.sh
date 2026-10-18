@@ -235,6 +235,20 @@ write_verified() {
     esac
 }
 
+# Превью операций для --dry-run — одна печать на все команды, иначе у копий
+# разъезжается вид: у отката кириллица уже шла как \uXXXX. В буфер напрямую:
+# печать не-ASCII через stdout падает при не-UTF-8 кодировке вывода. $1 (необязательный) —
+# ключ, под которым операции лежат во входном JSON.
+print_ops() {
+    python3 -c "
+import json, sys
+ops = json.load(sys.stdin)
+if len(sys.argv) > 1:
+    ops = ops[sys.argv[1]]
+sys.stdout.buffer.write(json.dumps(ops, ensure_ascii=False, indent=2).encode('utf-8') + b'\n')
+" "$@"
+}
+
 # Пространство страницы по уже прочитанному /api/docs: у всех блоков страницы
 # оно одно. Пусто — блоков в ответе нет (конверт ошибки или чужая страница).
 doc_space_id() {
@@ -415,12 +429,7 @@ if not found:
         if [[ -n "$DRY_RUN" ]]; then
             # Превью не трогает ни сеть, ни диск: файл отката по дефолтному пути
             # затёр бы откат предыдущего РЕАЛЬНОГО комментария.
-            echo "$BUILT" | python3 -c "
-import json, sys
-# Пишем в буфер напрямую: печать не-ASCII через stdout падает под не-UTF-8
-# локалью, а превью должно оставаться читаемым.
-out = json.dumps(json.load(sys.stdin)['ops'], ensure_ascii=False, indent=2)
-sys.stdout.buffer.write(out.encode('utf-8') + b'\n')"
+            echo "$BUILT" | print_ops ops
             exit 0
         fi
 
@@ -585,10 +594,7 @@ print(built['discussion'])
         if [[ -n "$DRY_RUN" ]]; then
             # Превью не пишет и файл отката: он затёр бы откат предыдущей
             # реальной записи.
-            echo "$BUILT" | python3 -c "
-import json, sys
-out = json.dumps(json.load(sys.stdin)['ops'], ensure_ascii=False, indent=2)
-sys.stdout.buffer.write(out.encode('utf-8') + b'\n')"
+            echo "$BUILT" | print_ops ops
             exit 0
         fi
 
@@ -655,7 +661,7 @@ print(built['comment'])
             exit 0
         fi
         if [[ -n "$DRY_RUN" ]]; then
-            echo "$OPS" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin), indent=2))"
+            echo "$OPS" | print_ops
             exit 0
         fi
 
@@ -726,7 +732,7 @@ open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
         if [[ -n "$DRY_RUN" ]]; then
             # Превью после всех сверок: агент видит ровно то, что уйдёт, или
             # отказ. Файл не переименовывается — откат ещё не применён.
-            echo "$OPS" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin), indent=2))"
+            echo "$OPS" | print_ops
             exit 0
         fi
 

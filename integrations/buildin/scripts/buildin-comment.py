@@ -881,12 +881,22 @@ def rollback_plan(body, doc, user_id, narrow, path):
             continue
         live = [c for c in tables["discussion"][rid].get("comments") or []
                 if c not in ours and (tables["comment"].get(c) or {}).get("status") != -1]
+        resolve = ("Закрыть тред, сохранив обсуждение: buildin-pages.sh comment-resolve %s %s"
+                   % (check["page"], rid))
+        foreign = [c for c in live if (tables["comment"].get(c) or {}).get("createdBy") != user_id]
+        if foreign:
+            return refuse(
+                "в треде %s есть чужие сообщения (%d): откат погасил бы их вместе с тредом."
+                % (rid, len(foreign)), resolve)
+        # Свои ответы откатываются своими файлами: сначала они, потом тред. Так
+        # агент, ответивший в собственный тред, видит выход, а не отсылку к
+        # «чужим» сообщениям (найдено живьём).
         if live:
             return refuse(
-                "в треде %s есть сообщения помимо вашего (%d): откат погасил бы их вместе с тредом."
+                "в треде %s есть ваши ответы (%d): откат погасил бы их вместе с тредом."
                 % (rid, len(live)),
-                "Закрыть тред, сохранив обсуждение: buildin-pages.sh comment-resolve %s %s"
-                % (check["page"], rid))
+                "Сначала откатите ответы — их файлы в строке «rollback:» вывода comment-reply, "
+                "потом этот файл. Или " + resolve[0].lower() + resolve[1:])
     if not narrow and any(op["path"] == ["data"] for op in ops):
         fresh = rollback_freshness(check, doc)
         if fresh != "fresh":
