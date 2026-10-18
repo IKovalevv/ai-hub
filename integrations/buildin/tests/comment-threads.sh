@@ -11,8 +11,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/comment-harness.sh"
 
 write_thread_fixture false
 RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
-if [ "$RC" -eq 0 ] && [ "$(thread_field resolved)" = "true" ] && [ "$(stdout)" = "discussion: $THREAD" ] && [ "$(posts)" -eq 1 ]; then
-    ok "comment-resolve закрывает тред и печатает его id в stdout"
+if [ "$RC" -eq 0 ] && [ "$(thread_field resolved)" = "true" ] && [ "$(posts)" -eq 1 ] \
+   && [ "$(stdout)" = "discussion: $THREAD
+status: changed" ]; then
+    ok "comment-resolve закрывает тред, в stdout — id и status: changed"
 else
     fail "comment-resolve не закрыл тред (rc=$RC, resolved=$(thread_field resolved)): $(stderr | head -2)"
 fi
@@ -27,8 +29,9 @@ fi
 
 write_thread_fixture true
 RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
-if [ "$RC" -eq 0 ] && ! sent && stderr | grep -q 'уже закрыт' && [ "$(stdout)" = "discussion: $THREAD" ]; then
-    ok "уже закрытый тред — без записи, выход 0"
+if [ "$RC" -eq 0 ] && ! sent && stderr | grep -q 'уже закрыт' && [ "$(stdout)" = "discussion: $THREAD
+status: noop" ]; then
+    ok "уже закрытый тред — без записи, выход 0, status: noop"
 else
     fail "повторный резолв что-то записал или упал (rc=$RC, POST-ов=$(posts))"
 fi
@@ -134,9 +137,11 @@ write_thread_fixture false
 RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ в тред')
 NEW=$(stdout | sed -n 's/^comment: //p')
 ERR_ID=$(stderr | sed -n 's/^comment: //p' | head -1)
-if [ "$RC" -eq 0 ] && [ -n "$NEW" ] && [ "$NEW" = "$ERR_ID" ] && [ "$(stdout | wc -l | tr -d ' ')" -eq 1 ] \
+RB_ERR=$(stderr | sed -n 's/^Откат: //p')
+if [ "$RC" -eq 0 ] && [ -n "$NEW" ] && [ "$NEW" = "$ERR_ID" ] && [ "$(stdout | wc -l | tr -d ' ')" -eq 2 ] \
+   && [ -n "$RB_ERR" ] && [ "$(stdout | sed -n 2p)" = "rollback: $RB_ERR" ] \
    && [ "$(thread_comments)" = "$FIRST $NEW" ] && [ "$(posts)" -eq 1 ]; then
-    ok "comment-reply дописывает ответ в конец треда, id — в stdout и заранее в stderr"
+    ok "comment-reply дописывает ответ в конец треда, id и путь к откату — в stdout, id заранее в stderr"
 else
     fail "comment-reply (rc=$RC, тред=$(thread_comments)): $(stderr | tail -2)"
 fi
@@ -421,6 +426,33 @@ assert ops and not any(o.get('path') == ['data'] for o in ops), ops
     ok "--narrow снимает только свой тред: сегменты не трогает, чужая подсветка цела"
 else
     fail "--narrow (rc=$RC): $ST $(stderr | head -2)"
+fi
+
+# --dry-run: те же сверки, вывод — операции, без записи и без .applied.
+RB="$TMP/rb-dry.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+for MODE in full --narrow; do
+    RC2=$(run_sub comment-rollback "$RB" --dry-run ${MODE#full})
+    if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && ! sent && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && stdout | python3 -c "
+import json, sys
+ops = json.load(sys.stdin)
+data = [o for o in ops if o.get('path') == ['data']]
+assert ops and len(data) == (0 if '$MODE' == '--narrow' else 1), ops
+" 2>/dev/null; then
+        ok "comment-rollback --dry-run ($MODE) показывает операции и ничего не пишет"
+    else
+        fail "comment-rollback --dry-run ($MODE, rc=$RC2): $(stdout | head -3) $(stderr | head -2)"
+    fi
+done
+
+RB="$TMP/rb-dry-stale.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'первый' "--rollback-out=$RB")
+RC2=$(SKIP_RESET=1 run_comment "$PAGE" "$BLOCK" 'безлимитный' 'второй')
+RC3=$(run_sub comment-rollback "$RB" --dry-run)
+if [ "$RC3" -eq 1 ] && ! sent && [ -e "$RB" ] && [ -z "$(stdout)" ] && stderr | grep -q 'блок изменился'; then
+    ok "comment-rollback --dry-run отказывает так же, как боевой прогон"
+else
+    fail "--dry-run пропустил устаревший файл (rc=$RC3): $(stdout | head -2)"
 fi
 
 RB="$TMP/rb-docs-fail.json"

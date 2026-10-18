@@ -31,7 +31,8 @@
 #                                                — закрыть тред (резолв); уже закрытый — без записи
 #   comment-unresolve <page_id|url> <discussion_id> [--dry-run]
 #                                                — открыть закрытый тред заново
-#   comment-rollback <file> [--narrow]           — применить файл отката comment/comment-reply;
+#   comment-rollback <file> [--narrow] [--dry-run]
+#                                                — применить файл отката comment/comment-reply;
 #                                                  файл становится <file>.applied, повтор — отказ;
 #                                                  блок меняли после комментария — полный откат
 #                                                  отвергается, --narrow снимает только свой тред;
@@ -507,8 +508,10 @@ print(built['discussion'])
         # бы в rc=1 на совершенно успешной записи.
         # Результат — в stdout, как id новой страницы у create: обёртке и агенту
         # естественно искать его там. Ранняя строка в stderr остаётся страховкой
-        # на случай обрыва до этого места.
+        # на случай обрыва до этого места. Путь к откату — там же: выковыривать
+        # его из stderr агенту приходилось бы среди предупреждений.
         echo "discussion: $DISCUSSION"
+        echo "rollback: $ROLLBACK_OUT"
 
         if [[ -n "$LOST" ]]; then
             echo "ВНИМАНИЕ: параллельная запись лишила подсветки чужие треды: ${LOST// /, }" >&2
@@ -590,6 +593,7 @@ print(built['comment'])
             "ответа в треде нет, ничего не создано, повтор безопасен. Файл отката $ROLLBACK_OUT применять не надо." \
             --reply-verdict "$DISCUSSION" "$COMMENT_ID"
         echo "comment: $COMMENT_ID"
+        echo "rollback: $ROLLBACK_OUT"
         ;;
 
     comment-resolve|comment-unresolve)
@@ -619,9 +623,13 @@ print(built['comment'])
         OPS=$(echo "$BUILT" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['ops']))")
         SPACE_ID=$(echo "$BUILT" | python3 -c "import json, sys; print(json.load(sys.stdin)['space'])")
 
+        # Строка status отличает «записал» от «уже было так»: код выхода у них
+        # один, а агенту разница нужна, например чтобы не рапортовать о
+        # закрытии треда, который закрыл кто-то другой.
         if [[ "$OPS" == "[]" ]]; then
             echo "Тред $DISCUSSION уже $STATE — записи не было." >&2
             echo "discussion: $DISCUSSION"
+            echo "status: noop"
             exit 0
         fi
         if [[ -n "$DRY_RUN" ]]; then
@@ -637,16 +645,18 @@ print(built['comment'])
             --resolve-verdict="$TARGET" "$DISCUSSION"
         echo "Тред $DISCUSSION $STATE." >&2
         echo "discussion: $DISCUSSION"
+        echo "status: changed"
         ;;
 
     comment-rollback)
-        USAGE='Usage: comment-rollback <file> [--narrow]
-  <file>: файл отката из stderr comment или comment-reply («Откат: <путь>»)
+        USAGE='Usage: comment-rollback <file> [--narrow] [--dry-run]
+  <file>: файл отката — строка «rollback: <путь>» в stdout comment или comment-reply
   --narrow: снять только свой тред, не возвращая сегменты блока — для блока,
             который изменился после комментария (полный откат тогда отвергается)
+  --dry-run: сверить файл со страницей и показать операции, ничего не записывая
   в треде есть чужие ответы или записи из файла не ваши — отказ: откат погасил бы чужое
   после применения файл переименовывается в <file>.applied — повтор отвергается'
-        parse_comment_flags "narrow" "$@"
+        parse_comment_flags "narrow dry-run" "$@"
         FILE="${ARGS[0]:-}"
         [[ -n "$FILE" && ${#ARGS[@]} -eq 1 ]] || { echo "$USAGE" >&2; exit 1; }
         # Применённый откат второй раз не применяется: полный откат снова вернул
@@ -691,6 +701,12 @@ open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
 " "$RB_DIR"
         SPACE_ID=$(cat "$RB_DIR/space")
         OPS=$(cat "$RB_DIR/ops")
+        if [[ -n "$DRY_RUN" ]]; then
+            # Превью после всех сверок: агент видит ровно то, что уйдёт, или
+            # отказ. Файл не переименовывается — откат ещё не применён.
+            echo "$OPS" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin), indent=2))"
+            exit 0
+        fi
 
         # Конверт собирается заново общим transaction(): в сеть уходит одна
         # форма тела, а из файла берётся только то, что проверено по операциям.
