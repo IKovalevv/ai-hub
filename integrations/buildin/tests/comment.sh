@@ -1129,6 +1129,15 @@ else
     fail "--mention в comment-reply (rc=$RC, текст=$(sent_text)): $(stderr | tail -2)"
 fi
 
+# Читатель comments ставит пробел после упоминания сам. Текст нашего ответа уже
+# начинается с пробела, и раньше выходило «@j.doe  ответ» с двойным пробелом.
+RC=$(run_cmd comments "$PAGE")
+if [ "$RC" -eq 0 ] && stdout | grep -q '@j.doe ответ' && ! stdout | grep -q '@j.doe  '; then
+    ok "comments печатает упоминание без двойного пробела"
+else
+    fail "comments и упоминание (rc=$RC): $(stdout | grep '@' | head -2)"
+fi
+
 write_thread_fixture false
 RC=$(run_sub comment-resolve "$PAGE" "$THREAD" "--mention=$OTHER")
 if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --mention'; then

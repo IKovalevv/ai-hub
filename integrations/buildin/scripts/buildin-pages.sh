@@ -528,10 +528,13 @@ def name(uuid):
 def rt(segments):
     # type 7 — @-упоминание человека: text пустой, uuid = user uuid
     parts = []
-    for s in (segments or []):
+    segments = segments or []
+    for i, s in enumerate(segments):
         if s.get('type') == 7:
-            # пробел после упоминания: следующий сегмент часто начинается сразу с текста
-            parts.append('@' + name(s.get('uuid', '')) + ' ')
+            # Пробел после упоминания нужен, когда следующий сегмент начинается
+            # сразу с текста. Если пробел в нём уже есть, второй дал бы «@Имя  текст».
+            nxt = segments[i + 1].get('text', '') if i + 1 < len(segments) else ''
+            parts.append('@' + name(s.get('uuid', '')) + ('' if nxt[:1].isspace() else ' '))
         else:
             parts.append(s.get('text', ''))
     return ''.join(parts).strip()
