@@ -233,6 +233,17 @@ write_verified() {
     esac
 }
 
+# Пространство страницы по уже прочитанному /api/docs: у всех блоков страницы
+# оно одно. Пусто — блоков в ответе нет (конверт ошибки или чужая страница).
+doc_space_id() {
+    python3 -c "
+import json, sys
+data = json.load(open(sys.argv[1])).get('data') or {}
+blocks = data.get('blocks') or {}
+print(next(iter(blocks.values()), {}).get('spaceId', ''))
+" "$1"
+}
+
 # Список команд для справки — одна копия на оба скрипта: buildin-pages.sh
 # берёт его отсюда подкомандой commands.
 print_commands() {
@@ -261,12 +272,7 @@ case "$COMMAND" in
         trap 'rm -f "$DOC_FILE" "$MEMBERS_FILE"' EXIT
 
         buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"
-        SPACE_ID=$(python3 -c "
-import json, sys
-data = json.load(open(sys.argv[1])).get('data', {})
-blocks = data.get('blocks', {})
-print(next(iter(blocks.values()), {}).get('spaceId', ''))
-" "$DOC_FILE")
+        SPACE_ID=$(doc_space_id "$DOC_FILE")
         # Участники нужны для имён авторов и @-упоминаний; без доступа — покажем UUID
         if [[ -n "$SPACE_ID" ]]; then
             buildin GET "/api/spaces/$SPACE_ID/members" > "$MEMBERS_FILE" 2>/dev/null || echo '{}' > "$MEMBERS_FILE"
@@ -721,6 +727,30 @@ open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
             echo "          Повторно его не применяйте." >&2
         fi
         echo "rollback: applied ($FILE.applied)"
+        ;;
+
+    members)
+        USAGE='Usage: members <page_id|url>
+  участники пространства страницы, по строке «<uuid>  <nickname>» — uuid для --mention'
+        [[ -n "${1:-}" && $# -eq 1 ]] || { echo "$USAGE" >&2; exit 1; }
+        parse_page_and_block_id "$1"
+
+        DOC_FILE=$(mktemp)
+        trap 'rm -f "$DOC_FILE"' EXIT
+        buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"
+        SPACE_ID=$(doc_space_id "$DOC_FILE")
+        [[ -n "$SPACE_ID" ]] || { echo "Error: в ответе на страницу $PAGE_ID нет блоков — пространство не определить." >&2; exit 1; }
+        # Почты не печатаем: для упоминания хватает uuid, а вывод целиком
+        # уходит в контекст агента — чужие адреса там ни к чему.
+        buildin GET "/api/spaces/$SPACE_ID/members" | python3 -c "
+import json, sys
+data = json.load(sys.stdin).get('data')
+if not isinstance(data, list):
+    sys.exit('Error: список участников пространства не получен.')
+users = [(m or {}).get('user') or {} for m in data]
+for user in sorted((u for u in users if u.get('uuid')), key=lambda u: (u.get('nickname') or '').lower()):
+    print('%s  %s' % (user['uuid'], user.get('nickname') or ''))
+"
         ;;
 
     commands)

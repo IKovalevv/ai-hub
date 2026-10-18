@@ -1045,7 +1045,7 @@ mkmembers() {
     mkmembers
     err=$(build_stderr "beta" "note" "--mention=88888888-8888-4888-8888-888888888888" "--members=$BATS_TEST_TMPDIR/members.json") || true
     [[ "$err" == *"среди участников пространства нет 88888888-8888-4888-8888-888888888888"* ]] || false
-    [[ "$err" == *"/api/spaces/<space_id>/members"* ]]
+    [[ "$err" == *"buildin-pages.sh members <page>"* ]]
 }
 
 @test "a mention without a members list is refused" {

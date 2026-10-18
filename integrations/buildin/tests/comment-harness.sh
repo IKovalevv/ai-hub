@@ -123,6 +123,7 @@ APPLY
 #   STUB_MUTATE_ON_GET=N       — начиная с N-го чтения сегменты блока другие
 #   STUB_IGNORE_WRITES         — POST принимается, но состояние не меняется
 #   STUB_FAIL_MEMBERS          — список участников пространства не отдаётся
+#   STUB_MEMBERS_ENVELOPE      — вместо списка участников конверт ошибки (HTTP 200, code 403)
 #   STUB_FAIL_DOCS             — страница не читается вовсе
 restore_stateful_stub() {
     cat > "$TMP/scripts/buildin.sh" <<STUB
@@ -135,7 +136,8 @@ case "\$ENDPOINT" in
         echo '{"code":200,"data":{"uuid":"user-1"}}' ;;
     /api/spaces/$SPACE/members)
         if [ -n "\${STUB_FAIL_MEMBERS:-}" ]; then echo "Error: HTTP 403" >&2; exit 1; fi
-        echo '{"code":200,"data":[{"user":{"uuid":"user-1","nickname":"agent"}},{"user":{"uuid":"$OTHER","nickname":"j.doe"}}]}' ;;
+        if [ -n "\${STUB_MEMBERS_ENVELOPE:-}" ]; then echo '{"code":403,"msg":"stub: forbidden"}'; exit 0; fi
+        echo '{"code":200,"data":[{"user":{"uuid":"$OTHER","nickname":"j.doe","email":"j.doe@example.com"}},{"user":{"uuid":"user-1","nickname":"agent"}}]}' ;;
     /api/docs/$PAGE)
         if [ -n "\${STUB_FAIL_DOCS:-}" ]; then echo "Error: HTTP 503" >&2; exit 1; fi
         N=\$(cat "\$LOG_DIR/getn" 2>/dev/null || echo 0); N=\$((N + 1)); echo "\$N" > "\$LOG_DIR/getn"

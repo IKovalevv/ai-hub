@@ -485,7 +485,7 @@ def check_mentions(mentions, members_doc):
     if unknown:
         raise MentionError(
             "среди участников пространства нет %s.\n"
-            "uuid участника — поле user.uuid в ответе buildin.sh GET /api/spaces/<space_id>/members."
+            "Участники и их uuid: buildin-pages.sh members <page>."
             % ", ".join(unknown)
         )
     return list(dict.fromkeys(mentions))

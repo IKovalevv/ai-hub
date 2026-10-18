@@ -324,10 +324,10 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" insert-blocks-before "<page_id>" "<bloc
    `comment: <uuid>` и `rollback: <путь>`.
 
    Позвать человека — `--mention=<user_uuid>`, и у `comment-reply`, и у
-   `comment` (можно несколько). uuid — поле `user.uuid` в ответе
-   `bash "$BUILDIN_SCRIPTS/buildin.sh" GET /api/spaces/<space_id>/members`;
-   не участника пространства команда отвергает. `@@j.doe` в тексте — это
-   просто текст, а не упоминание.
+   `comment` (можно несколько). uuid даёт
+   `bash "$BUILDIN_SCRIPTS/buildin-pages.sh" members "<page_id>"` — строки
+   `<uuid>  <nickname>`; не участника пространства команда отвергает.
+   `@@j.doe` в тексте — это просто текст, а не упоминание.
 
    **Резолв треда** — закрыть обсуждение или открыть его заново. Id треда —
    строка `Тред <uuid>` в выводе `comments`:

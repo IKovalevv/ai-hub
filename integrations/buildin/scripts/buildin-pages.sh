@@ -46,7 +46,8 @@ shift 2>/dev/null || true
 case "$COMMAND" in
     # Команды комментариев живут в buildin-comments.sh: так этот скрипт не
     # растёт с каждой операцией над тредами, а вызов для агента остаётся прежним.
-    comments|comment|comment-*)
+    # members — там же: это источник uuid для --mention.
+    comments|comment|comment-*|members)
         exec "$SCRIPT_DIR/buildin-comments.sh" "$COMMAND" "$@"
         ;;
 

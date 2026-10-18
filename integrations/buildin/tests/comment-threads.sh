@@ -612,4 +612,43 @@ else
     fail "резолв принял --mention (rc=$RC)"
 fi
 
+
+# ---- members -----------------------------------------------------------------
+write_fixture
+for FORM in "$PAGE" "https://buildin.ai/$SPACE/$PAGE"; do
+    RC=$(run_sub members "$FORM")
+    if [ "$RC" -eq 0 ] && ! sent && [ "$(stdout)" = "user-1  agent
+$OTHER  j.doe" ] && ! stdout | grep -q '@'; then
+        ok "members ($FORM): uuid и ник участников, без почт"
+    else
+        fail "members ($FORM, rc=$RC): $(stdout | head -3) $(stderr | head -2)"
+    fi
+done
+
+for KNOB in STUB_FAIL_MEMBERS STUB_MEMBERS_ENVELOPE; do
+    export "$KNOB=1"
+    RC=$(run_sub members "$PAGE")
+    unset "$KNOB"
+    if [ "$RC" -ne 0 ] && [ -z "$(stdout)" ] && { [ "$KNOB" = STUB_FAIL_MEMBERS ] || stderr | grep -q 'не получен'; }; then
+        ok "members: список участников не получен ($KNOB) — ошибка, а не пустой список"
+    else
+        fail "members при недоступном списке ($KNOB, rc=$RC): $(stdout | head -2) $(stderr | tail -2)"
+    fi
+done
+
+printf '%s' '{"code":200,"data":{"blocks":{}}}' > "$TMP/state.json"
+RC=$(run_sub members "$PAGE")
+if [ "$RC" -eq 1 ] && stderr | grep -q 'пространство не определить'; then
+    ok "members: в ответе на страницу нет блоков — понятная ошибка"
+else
+    fail "members без блоков на странице (rc=$RC): $(stderr | tail -2)"
+fi
+
+RC=$(run_sub members "$PAGE" лишний)
+if [ "$RC" -eq 1 ] && stderr | grep -q 'Usage: members'; then
+    ok "members с лишним аргументом — справка"
+else
+    fail "members принял лишний аргумент (rc=$RC)"
+fi
+
 finish
