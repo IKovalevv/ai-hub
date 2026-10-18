@@ -338,6 +338,49 @@ else
     fail "сбой POST при откате (rc=$RC2, файлы: $(ls "$RB"* 2>/dev/null | tr '\n' ' '))"
 fi
 
+# В сеть уходит тело, собранное заново: из файла берутся только проверенные
+# операции и spaceId, а свои ключи, id транзакции и check файла остаются за бортом.
+RB="$TMP/rb-rebuilt.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+python3 -c "
+import json
+b = json.load(open('$RB'))
+b['requestId'] = 'file-request'; b['extra'] = 1
+b['transactions'][0].update(id='file-tx', extra=1)
+json.dump(b, open('$RB', 'w'))"
+RC2=$(run_sub comment-rollback "$RB")
+if [ "$RC2" -eq 0 ] && python3 -c "
+import json
+b = json.load(open('$TMP/log/tx-body.json'))
+assert set(b) == {'requestId', 'transactions'} and b['requestId'] != 'file-request', b
+tx = b['transactions'][0]
+assert set(tx) == {'id', 'spaceId', 'operations'} and tx['id'] != 'file-tx', tx
+" 2>/dev/null; then
+    ok "откат шлёт тело, собранное заново: без check и чужих ключей файла"
+else
+    fail "тело отката взято из файла (rc=$RC2): $(head -c 300 "$TMP/log/tx-body.json")"
+fi
+
+# Два комментария в один блок откатываются в обратном порядке, оба полным
+# откатом: откат второго возвращает блок ровно к тому, что записал первый.
+RB_A="$TMP/rb-order-a.json"; RB_B="$TMP/rb-order-b.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'первый' "--rollback-out=$RB_A")
+RC2=$(SKIP_RESET=1 run_comment "$PAGE" "$BLOCK" 'безлимитный' 'второй' "--rollback-out=$RB_B")
+RC3=$(run_sub comment-rollback "$RB_B")
+RC4=$(run_sub comment-rollback "$RB_A")
+ST=$(block_state)
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ "$RC3" -eq 0 ] && [ "$RC4" -eq 0 ] \
+   && [ -e "$RB_A.applied" ] && [ -e "$RB_B.applied" ] && echo "$ST" | python3 -c "
+import json, sys
+st = json.load(sys.stdin)
+assert st['listed'] == [] and st['lit'] == [] and st['n'] == 3, st
+assert st['text'] == 'безлимитный тариф: лимит 100 запросов в минуту', st
+" 2>/dev/null; then
+    ok "B, затем A — оба полным откатом, блок вернулся к исходному"
+else
+    fail "откат в обратном порядке (rc=$RC3/$RC4): $ST $(stderr | head -2)"
+fi
+
 # Проверка после отката: в .applied файл уходит только тогда, когда откат
 # виден на странице. Иначе неприменившийся откат было бы уже не повторить.
 RB="$TMP/rb-ignored.json"
@@ -602,6 +645,36 @@ if [ "$RC" -eq 0 ] && stdout | grep -q '@j.doe ответ' && ! stdout | grep -q
     ok "comments печатает упоминание без двойного пробела"
 else
     fail "comments и упоминание (rc=$RC): $(stdout | grep '@' | head -2)"
+fi
+
+# Все формы упоминания в одном треде — с точным выводом: проверка «нет двойного
+# пробела» пропустила бы и склейку «@j.doeпосмотри», и лишний пробел в конце.
+python3 - "$TMP/state.json" "$BLOCK" "$THREAD" "$SPACE" "$OTHER" <<'FIX'
+import json, sys
+path, block, thread, space, other = sys.argv[1:6]
+mention = lambda uid: {"text": "", "type": 7, "uuid": uid, "enhancer": {}}
+text = lambda t: {"text": t, "type": 0, "enhancer": {}}
+bodies = [[mention(other), text("посмотри")], [mention(other), text(" ответ")], [mention(other)],
+          [mention(other), text(" "), mention("user-1"), text(" текст")]]
+ids = ["99999999-0000-4000-8000-00000000000%d" % i for i in range(len(bodies))]
+state = {"code": 200, "data": {
+    "blocks": {block: {"uuid": block, "spaceId": space, "type": 1, "discussions": [thread],
+                       "data": {"segments": [text("абзац")]}}},
+    "discussions": {thread: {"uuid": thread, "spaceId": space, "parentId": block, "status": 1,
+                             "resolved": False, "comments": ids}},
+    "comments": {cid: {"uuid": cid, "spaceId": space, "parentId": thread, "status": 1,
+                       "createdBy": "user-1", "text": body} for cid, body in zip(ids, bodies)}}}
+json.dump(state, open(path, "w"), ensure_ascii=False)
+FIX
+RC=$(run_cmd comments "$PAGE")
+GOT=$(stdout | sed -n 's/^- agent (?): //p')
+if [ "$RC" -eq 0 ] && [ "$GOT" = "@j.doe посмотри
+@j.doe ответ
+@j.doe
+@j.doe @agent текст" ]; then
+    ok "comments: все формы упоминания — с точным выводом"
+else
+    fail "comments и формы упоминания (rc=$RC): $GOT"
 fi
 
 write_thread_fixture false
