@@ -194,6 +194,44 @@ print(json.dumps(body))
     echo "Откат: $ROLLBACK_OUT" >&2
 }
 
+# Запись с проверкой после неё — одна на ответ, резолв и откат: у копий
+# разошлись бы коды выхода, а агент решает по ним, можно ли повторять.
+# POST, перечитать страницу, вердикт билдера. Возвращается только при «ok»,
+# иначе выход: 2 — исход неизвестен, 1 — транзакция не легла, повтор безопасен.
+#   $1 spaceId, $2 операции, $3 страница, $4 файл под перечитанную страницу,
+#   $5 что пишем (для сообщений), $6 что делать при неизвестном исходе,
+#   $7 что сказать, если транзакция не легла; дальше — режим вердикта билдера
+#   и его аргументы после перечитанной страницы.
+write_verified() {
+    local space=$1 ops=$2 page=$3 doc=$4 what=$5 unknown=$6 not_applied=$7 mode=$8 status
+    shift 8
+    if ! transaction "$space" "$ops" > /dev/null; then
+        echo "Error: исход записи неизвестен ($what)." >&2
+        echo "       $unknown" >&2
+        exit 2
+    fi
+    if ! buildin GET "/api/docs/$page" > "$doc"; then
+        echo "Error: транзакция отправлена ($what), но проверить результат не удалось." >&2
+        echo "       $unknown" >&2
+        exit 2
+    fi
+    status=$(python3 "$SCRIPT_DIR/buildin-comment.py" "$mode" -- "$doc" "$@")
+    case "$status" in
+        ok)
+            return 0
+            ;;
+        not-applied)
+            echo "Error: транзакция не применилась ($what) — $not_applied" >&2
+            exit 1
+            ;;
+        *)
+            echo "Error: проверочное чтение не подтвердило запись ($what) — исход неизвестен." >&2
+            echo "       $unknown" >&2
+            exit 2
+            ;;
+    esac
+}
+
 # Список команд для справки — одна копия на оба скрипта: buildin-pages.sh
 # берёт его отсюда подкомандой commands.
 print_commands() {
@@ -547,29 +585,10 @@ print(built['comment'])
         # id ответа — до записи, по той же причине, что у comment: если POST
         # оборвётся, узнать его будет неоткуда, а слепой повтор задвоит ответ.
         echo "comment: $COMMENT_ID" >&2
-        if ! transaction "$SPACE_ID" "$(cat "$OPS_DIR/ops.json")" > /dev/null; then
-            echo "Error: исход записи неизвестен (comment: $COMMENT_ID)." >&2
-            echo "       Не повторяйте команду вслепую — сначала посмотрите тред: buildin-pages.sh comments $PAGE_ID" >&2
-            exit 2
-        fi
-        if ! buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"; then
-            echo "Error: транзакция отправлена (comment: $COMMENT_ID), но проверить результат не удалось." >&2
-            echo "       Не повторяйте команду вслепую — сначала посмотрите тред: buildin-pages.sh comments $PAGE_ID" >&2
-            exit 2
-        fi
-        STATUS=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply-verdict -- "$DOC_FILE" "$DISCUSSION" "$COMMENT_ID")
-        case "$STATUS" in
-            unverified)
-                echo "Error: проверочное чтение не вернуло тред $DISCUSSION — исход записи неизвестен." >&2
-                echo "       Ответ: $COMMENT_ID. Не повторяйте команду вслепую — посмотрите тред: buildin-pages.sh comments $PAGE_ID" >&2
-                exit 2
-                ;;
-            not-applied)
-                echo "Error: транзакция не применилась — ответа $COMMENT_ID в треде нет." >&2
-                echo "       Ничего создано не было, повтор безопасен. Файл отката $ROLLBACK_OUT применять не надо." >&2
-                exit 1
-                ;;
-        esac
+        write_verified "$SPACE_ID" "$(cat "$OPS_DIR/ops.json")" "$PAGE_ID" "$DOC_FILE" "comment: $COMMENT_ID" \
+            "Не повторяйте команду вслепую — сначала посмотрите тред: buildin-pages.sh comments $PAGE_ID" \
+            "ответа в треде нет, ничего не создано, повтор безопасен. Файл отката $ROLLBACK_OUT применять не надо." \
+            --reply-verdict "$DISCUSSION" "$COMMENT_ID"
         echo "comment: $COMMENT_ID"
         ;;
 
@@ -612,28 +631,10 @@ print(built['comment'])
 
         # Резолв идемпотентен, поэтому при неизвестном исходе повтор безопасен —
         # в отличие от comment, где слепой повтор повесил бы второй тред.
-        if ! transaction "$SPACE_ID" "$OPS" > /dev/null; then
-            echo "Error: исход записи неизвестен (discussion: $DISCUSSION)." >&2
-            echo "       Повтор безопасен: команда сама увидит, если тред уже $STATE." >&2
-            exit 2
-        fi
-        if ! buildin GET "/api/docs/$PAGE_ID" > "$DOC_FILE"; then
-            echo "Error: транзакция отправлена (discussion: $DISCUSSION), но проверить результат не удалось." >&2
-            echo "       Повтор безопасен: команда сама увидит, если тред уже $STATE." >&2
-            exit 2
-        fi
-        STATUS=$(python3 "$SCRIPT_DIR/buildin-comment.py" --resolve-verdict="$TARGET" -- "$DOC_FILE" "$DISCUSSION")
-        case "$STATUS" in
-            unverified)
-                echo "Error: проверочное чтение не вернуло тред $DISCUSSION — исход записи неизвестен." >&2
-                echo "       Повтор безопасен: команда сама увидит, если тред уже $STATE." >&2
-                exit 2
-                ;;
-            not-applied)
-                echo "Error: транзакция не применилась — тред $DISCUSSION не $STATE. Повтор безопасен." >&2
-                exit 1
-                ;;
-        esac
+        write_verified "$SPACE_ID" "$OPS" "$PAGE_ID" "$DOC_FILE" "discussion: $DISCUSSION" \
+            "Повтор безопасен: команда сама увидит, если тред уже $STATE." \
+            "тред не $STATE. Повтор безопасен." \
+            --resolve-verdict="$TARGET" "$DISCUSSION"
         echo "Тред $DISCUSSION $STATE." >&2
         echo "discussion: $DISCUSSION"
         ;;
@@ -693,11 +694,12 @@ open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
 
         # Конверт собирается заново общим transaction(): в сеть уходит одна
         # форма тела, а из файла берётся только то, что проверено по операциям.
-        if ! transaction "$SPACE_ID" "$OPS" > /dev/null; then
-            echo "Error: исход отката неизвестен — файл не переименован." >&2
-            echo "       Прежде чем применять снова, посмотрите блок или тред командой comments." >&2
-            exit 2
-        fi
+        # В .applied файл уходит только после подтверждения на странице: иначе
+        # неприменившийся откат уже не повторить, а повтор тут безопасен.
+        write_verified "$SPACE_ID" "$OPS" "$CHECK_PAGE" "$RB_DIR/doc.json" "откат $FILE" \
+            "Файл не переименован. Прежде чем применять снова, посмотрите блок или тред: buildin-pages.sh comments $CHECK_PAGE" \
+            "файл не переименован, повтор безопасен." \
+            --rollback-verdict "$RB_DIR/ops"
         if ! mv "$FILE" "$FILE.applied"; then
             echo "ВНИМАНИЕ: откат применён, но переименовать $FILE не удалось." >&2
             echo "          Повторно его не применяйте." >&2

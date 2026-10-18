@@ -52,6 +52,7 @@ Usage:
     buildin-comment.py --resolve-verdict=true|false -- <after_json> <discussion_id>
     buildin-comment.py --check-rollback -- <rollback_file>
     buildin-comment.py --rollback-plan [--narrow] --user=<uuid> -- <rollback_file> <doc_json>
+    buildin-comment.py --rollback-verdict -- <after_json> <ops_json>
 
 <doc_json> — файл с ответом /api/docs (или «-» для stdin).
 --occurrence N — какое вхождение якоря выделить (1-based), когда их несколько.
@@ -690,19 +691,21 @@ def build_reply_ops(thread, discussion_id, text, now, user_id, mentions=()):
             "discussion": discussion_id, "space": space_id}
 
 
-def reply_verdict(after, discussion_id, comment_id):
-    """Исход ответа по снимку после записи.
+def thread_verdict(after, discussion_id, landed):
+    """Исход записи в тред по снимку после неё — общий для ответа и резолва.
 
       unverified  — треда нет в ответе: конверт ошибки или чужая страница;
-      not-applied — нашего сообщения нет в списке треда. listAfter аддитивен,
-                    параллельный ответ наш id не выбивает, значит транзакция
-                    не легла: создавать было нечего, повтор безопасен;
-      ok          — сообщение в треде.
+      not-applied — тред на месте, а landed(тред) ложно: запись не легла;
+      ok          — запись видна в треде.
+
+    У ответа not-applied надёжен: listAfter аддитивен, и параллельный ответ наш
+    id из списка не выбивает. У резолва флаг мог бы вернуть и чужой резолв, но
+    тогда повтор всё равно безопасен — он идемпотентен.
     """
     thread = find_thread(after, discussion_id)
     if thread is None:
         return "unverified"
-    return "ok" if comment_id in (thread.get("comments") or []) else "not-applied"
+    return "ok" if landed(thread) else "not-applied"
 
 
 def build_resolve_ops(thread, discussion_id, resolved):
@@ -719,19 +722,6 @@ def build_resolve_ops(thread, discussion_id, resolved):
         return []
     return [{"id": discussion_id, "command": "update", "table": "discussion", "path": [],
              "args": {"resolved": resolved}}]
-
-
-def resolve_verdict(after, discussion_id, resolved):
-    """Исход резолва по снимку после записи.
-
-      unverified  — треда нет в ответе: конверт ошибки или чужая страница;
-      not-applied — тред на месте, а флаг прежний: запись не легла;
-      ok          — флаг стоит.
-    """
-    thread = find_thread(after, discussion_id)
-    if thread is None:
-        return "unverified"
-    return "ok" if bool(thread.get("resolved")) == resolved else "not-applied"
 
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -906,6 +896,39 @@ def rollback_plan(body, doc, user_id, narrow, path):
     return {"apply": True, "reason": "", "hint": "", "space": space, "ops": chosen}
 
 
+def rollback_verdict(after, ops):
+    """Исход отката по снимку страницы после записи.
+
+    Сверяется то, что видно на странице: id, убранные из списков, и у полного
+    отката — вернувшиеся сегменты блока. Status погашенных записей не
+    сверяется: /api/docs не обязан их возвращать.
+
+      unverified  — записи-владельца списка или блока нет в ответе (конверт
+                    ошибки, не та страница) либо легла лишь часть изменений.
+                    Транзакция атомарна, так что смесь значит чужую правку
+                    после отката, и что именно легло — неизвестно;
+      not-applied — не легло ни одно изменение: откат не применился, повтор безопасен;
+      ok          — все изменения на странице.
+    """
+    data = (after.get("data") if isinstance(after, dict) else None) or {}
+    owners = {"block": data.get("blocks") or {}, "discussion": data.get("discussions") or {}}
+    landed = []
+    for op in ops:
+        if op["command"] == "listRemove":
+            owner = owners[op["table"]].get(op["id"])
+            if owner is None:
+                return "unverified"
+            landed.append(op["args"]["uuid"] not in (owner.get(op["path"][0]) or []))
+        elif op["path"] == ["data"]:
+            block = owners["block"].get(op["id"])
+            if block is None:
+                return "unverified"
+            landed.append(((block.get("data") or {}).get("segments") or []) == op["args"]["segments"])
+    if all(landed):
+        return "ok"
+    return "not-applied" if not any(landed) else "unverified"
+
+
 def load_doc(path):
     """Ответ /api/docs или пустой документ, если это не JSON (конверт ошибки)."""
     try:
@@ -962,7 +985,8 @@ def run_reply(args, opts):
 
 def run_reply_verdict(args, opts):
     after_path, discussion_id, comment_id = args
-    print(reply_verdict(load_doc(after_path), discussion_id, comment_id))
+    print(thread_verdict(load_doc(after_path), discussion_id,
+                         lambda thread: comment_id in (thread.get("comments") or [])))
 
 
 def run_resolve(args, opts):
@@ -974,7 +998,8 @@ def run_resolve(args, opts):
 
 def run_resolve_verdict(args, opts):
     after_path, discussion_id = args
-    print(resolve_verdict(load_doc(after_path), discussion_id, opts["resolved"]))
+    print(thread_verdict(load_doc(after_path), discussion_id,
+                         lambda thread: bool(thread.get("resolved")) == opts["resolved"]))
 
 
 def run_check_rollback(args, opts):
@@ -986,6 +1011,11 @@ def run_check_rollback(args, opts):
 def run_rollback_plan(args, opts):
     print(json.dumps(rollback_plan(load_doc(args[0]), load_doc(args[1]), opts["user"],
                                    opts["narrow"], args[0])))
+
+
+def run_rollback_verdict(args, opts):
+    after_path, ops_path = args
+    print(rollback_verdict(load_doc(after_path), load_doc(ops_path)))
 
 
 # Режимы билдера — одной таблицей: режим → (число позиционных после «--»,
@@ -1001,6 +1031,7 @@ MODES = {
     "resolve-verdict": (2, run_resolve_verdict, True),  # <after_json> <discussion_id>
     "check-rollback": (1, run_check_rollback, False),   # <rollback_file>
     "rollback-plan": (2, run_rollback_plan, False),     # <rollback_file> <doc_json>
+    "rollback-verdict": (2, run_rollback_verdict, False),  # <after_json> <ops_json>
 }
 
 

@@ -112,7 +112,7 @@ write_thread_fixture false
 export STUB_INBAND_ERROR=1
 RC=$(run_sub comment-resolve "$PAGE" "$THREAD")
 unset STUB_INBAND_ERROR
-if [ "$RC" -eq 2 ] && stderr | grep -q 'не вернуло тред'; then
+if [ "$RC" -eq 2 ] && stderr | grep -q 'не подтвердило запись'; then
     ok "конверт ошибки на проверке резолва — код 2"
 else
     fail "конверт ошибки на проверке резолва (rc=$RC): $(stderr | tail -2)"
@@ -253,7 +253,7 @@ write_thread_fixture false
 export STUB_INBAND_ERROR=1
 RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
 unset STUB_INBAND_ERROR
-if [ "$RC" -eq 2 ] && stderr | grep -q 'не вернуло тред'; then
+if [ "$RC" -eq 2 ] && stderr | grep -q 'не подтвердило запись'; then
     ok "конверт ошибки на проверке ответа — код 2"
 else
     fail "конверт ошибки на проверке ответа (rc=$RC): $(stderr | tail -2)"
@@ -327,11 +327,38 @@ RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out
 export STUB_FAIL_POST=1
 RC2=$(run_sub comment-rollback "$RB")
 unset STUB_FAIL_POST
-if [ "$RC2" -eq 2 ] && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && stderr | grep -q 'файл не переименован'; then
+if [ "$RC2" -eq 2 ] && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && stderr | grep -q 'не переименован'; then
     ok "сбой POST при откате — код 2, файл остаётся на месте"
 else
     fail "сбой POST при откате (rc=$RC2, файлы: $(ls "$RB"* 2>/dev/null | tr '\n' ' '))"
 fi
+
+# Проверка после отката: в .applied файл уходит только тогда, когда откат
+# виден на странице. Иначе неприменившийся откат было бы уже не повторить.
+RB="$TMP/rb-ignored.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+export STUB_IGNORE_WRITES=1
+RC2=$(run_sub comment-rollback "$RB")
+unset STUB_IGNORE_WRITES
+if [ "$RC2" -eq 1 ] && sent && [ -e "$RB" ] && [ ! -e "$RB.applied" ] \
+   && stderr | grep -q 'не применилась' && stderr | grep -q 'повтор безопасен' && ! stdout | grep -q 'applied'; then
+    ok "откат не лёг — код 1, файл на месте, повтор безопасен"
+else
+    fail "неприменившийся откат (rc=$RC2, файлы: $(ls "$RB"* 2>/dev/null | tr '\n' ' ')): $(stderr | tail -2)"
+fi
+
+for KNOB in STUB_FAIL_GET_AFTER_WRITE STUB_INBAND_ERROR; do
+    RB="$TMP/rb-unread-$KNOB.json"
+    RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+    export "$KNOB=1"
+    RC2=$(run_sub comment-rollback "$RB")
+    unset "$KNOB"
+    if [ "$RC2" -eq 2 ] && sent && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && stderr | grep -q 'не переименован'; then
+        ok "откат отправлен, а проверить нельзя ($KNOB) — код 2, файл на месте"
+    else
+        fail "непроверенный откат ($KNOB, rc=$RC2, файлы: $(ls "$RB"* 2>/dev/null | tr '\n' ' ')): $(stderr | tail -2)"
+    fi
+done
 
 # Каталог только на чтение: файл не переименовать, но откат уже ушёл — команда
 # обязана предупредить, а не упасть молча. Под root права каталога не мешают

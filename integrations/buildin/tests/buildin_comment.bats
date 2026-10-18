@@ -971,6 +971,49 @@ PY2
     [ "$status" -eq 0 ]
 }
 
+@test "rollback verdict: all changes on the page is ok, none is not-applied, a mix or no owner is unverified" {
+    run python3 - "$OPS_PY" "$BATS_TEST_TMPDIR" "$BLOCK" <<'PY2'
+import json, subprocess, sys
+ops_py, tmp, block = sys.argv[1:4]
+D, C = "66666666-6666-4666-8666-666666666666", "88888888-8888-4888-8888-888888888882"
+snap = [{"text": "alpha beta", "type": 0, "enhancer": {}}]
+after = [{"text": "alpha ", "type": 0, "enhancer": {}}, {"text": "beta", "type": 0, "enhancer": {}, "discussions": [D]}]
+retire = {"id": D, "command": "update", "table": "discussion", "path": [], "args": {"status": -1}}
+full = [{"id": block, "command": "update", "table": "block", "path": ["data"], "args": {"segments": snap}},
+        {"id": block, "command": "listRemove", "table": "block", "path": ["discussions"], "args": {"uuid": D}}, retire]
+narrow = full[1:]
+reply = [{"id": D, "command": "listRemove", "table": "discussion", "path": ["comments"], "args": {"uuid": C}}]
+def page(listed, segments, comments=None):
+    data = {"blocks": {block: {"uuid": block, "discussions": listed, "data": {"segments": segments}}}}
+    if comments is not None:
+        data["discussions"] = {D: {"uuid": D, "comments": comments}}
+    return {"code": 200, "data": data}
+cases = [
+    ("full landed", full, page([], snap), "ok"),
+    ("full not landed", full, page([D], after), "not-applied"),
+    ("unlisted, but segments not back", full, page([], after), "unverified"),
+    ("error envelope", full, {"code": 500, "msg": "x"}, "unverified"),
+    ("narrow landed, segments untouched", narrow, page([], after), "ok"),
+    ("narrow not landed", narrow, page([D], after), "not-applied"),
+    ("reply removed", reply, page([D], after, comments=["x"]), "ok"),
+    ("reply still there", reply, page([D], after, comments=["x", C]), "not-applied"),
+    ("thread gone from the page", reply, page([D], after), "unverified"),
+]
+bad = []
+for name, ops, doc, want in cases:
+    json.dump(ops, open(tmp + "/ops.json", "w")); json.dump(doc, open(tmp + "/after.json", "w"))
+    got = subprocess.run([sys.executable, ops_py, "--rollback-verdict", "--", tmp + "/after.json", tmp + "/ops.json"],
+                         capture_output=True, text=True).stdout.strip()
+    if got != want:
+        bad.append((name, got, want))
+for x in bad:
+    print("WRONG VERDICT:", x)
+sys.exit(1 if bad else 0)
+PY2
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
+
 # ---- @-упоминания -----------------------------------------------------------
 
 JDOE=55555555-5555-4555-8555-555555555555
