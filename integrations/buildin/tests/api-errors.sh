@@ -113,7 +113,8 @@ expect_fail "HTTP 500 — прежняя ветка"              '{"code":200}'
 # ---- песочница 2: buildin-pages.sh с застабленным buildin.sh -----------------
 PAGES_DIR="$TMP/pages"
 mkdir -p "$PAGES_DIR/scripts" "$PAGES_DIR/log"
-cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-blocks.py" "$PAGES_DIR/scripts/"
+cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
+   "$SRC_DIR/buildin-blocks.py" "$PAGES_DIR/scripts/"
 
 cat > "$PAGES_DIR/scripts/buildin.sh" <<STUB
 #!/usr/bin/env bash
@@ -185,8 +186,8 @@ fi
 # клиента в конвейере `buildin ... | python3`, и остановить питон оттуда нельзя.
 # На пустом stdin он валится JSONDecodeError и забивает трейсбеком то самое
 # внятное сообщение, ради которого всё делалось.
-cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-nav.sh" "$SRC_DIR/buildin-blocks.py" \
-   "$API_ROOT/integrations/buildin/scripts/"
+cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
+   "$SRC_DIR/buildin-nav.sh" "$SRC_DIR/buildin-blocks.py" "$API_ROOT/integrations/buildin/scripts/"
 
 PAGES="$API_ROOT/integrations/buildin/scripts/buildin-pages.sh"
 NAV="$API_ROOT/integrations/buildin/scripts/buildin-nav.sh"

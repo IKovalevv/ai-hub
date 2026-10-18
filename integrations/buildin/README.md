@@ -10,9 +10,11 @@ integrations/buildin/
 │   └── plugin.json           # Манифест плагина
 ├── scripts/
 │   ├── buildin.sh            # Level 1: HTTP-клиент (curl + Bearer JWT, UI API)
-│   ├── buildin-pages.sh      # Level 2: CRUD + read (markdown) + комментарии + delete-block
+│   ├── buildin-pages.sh      # Level 2: CRUD + read (markdown) + delete-block; команды комментариев передаёт в buildin-comments.sh
+│   ├── buildin-comments.sh   # Level 2: комментарии — треды, ответы, резолв, откат
+│   ├── buildin-lib.sh        # Общие хелперы двух скриптов выше (подключается через source)
 │   ├── buildin-blocks.py     # Построитель транзакций для дерева блоков (вложенность)
-│   ├── buildin-comment.py    # Построитель операций комментария: поиск якоря, перенарезка сегментов
+│   ├── buildin-comment.py    # Построитель операций комментариев: якорь, перенарезка сегментов, треды, откат
 │   ├── md-to-blocks.py       # Конвертер Markdown → блоки (таблицы, toggle, mermaid)
 │   ├── buildin-publish-md.py # Движок publish-md: батчи, ретраи, режим --replace
 │   ├── buildin-verify-md.py  # Сверка опубликованной страницы с исходным markdown

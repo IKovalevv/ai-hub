@@ -28,7 +28,8 @@ SPACE=33333333-3333-4333-8333-333333333333
 OTHER=44444444-4444-4444-4444-444444444444
 
 mkdir -p "$TMP/scripts" "$TMP/log"
-cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-comment.py" "$TMP/scripts/"
+cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
+   "$SRC_DIR/buildin-comment.py" "$TMP/scripts/"
 
 # Состояние страницы: один блок с тремя сегментами — обычный, code, хвост.
 # «лимит» встречается дважды (в «безлимитный» и отдельно) — материал для
@@ -539,7 +540,7 @@ fi
 # ---- #5 (раунд 3): transaction() не шлёт пустое тело ни в каком контексте ----
 # Регрессия из fcb0107: сбор тела подстановкой в аргументе прятал сбой от set -e.
 # Вторая половина — вызов в условии if, где bash глушит set -e во всей функции.
-python3 - "$SRC_DIR/buildin-pages.sh" "$TMP/tx-probe.sh" <<'EXTRACT'
+python3 - "$SRC_DIR/buildin-lib.sh" "$TMP/tx-probe.sh" <<'EXTRACT'
 import sys
 src_path, out_path = sys.argv[1:3]
 src = open(src_path, encoding="utf-8").read()
