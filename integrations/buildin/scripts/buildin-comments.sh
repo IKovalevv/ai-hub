@@ -677,31 +677,27 @@ open(os.path.join(out, 'restores'), 'w').write('1' if c['ops'] != c['narrow_ops'
             # нашего комментария, снапшот стёр бы чужие правки и подсветку,
             # поэтому сначала сверка: блок должен быть ровно таким, каким его
             # оставила наша запись.
-            if [[ -z "$CHECK_PAGE" ]]; then
-                echo "ВНИМАНИЕ: в файле нет данных для сверки с блоком — сегменты вернутся без проверки свежести." >&2
-            else
-                if ! buildin GET "/api/docs/$CHECK_PAGE" > "$RB_DIR/doc.json"; then
-                    echo "Error: не удалось прочитать страницу, чтобы сверить блок с файлом отката — откат не применён." >&2
-                    exit 1
-                fi
-                # Применяем только при явном fresh: сбой сверки не должен
-                # превращаться в откат вслепую.
-                FRESH=$(python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-fresh -- "$FILE" "$RB_DIR/doc.json")
-                case "$FRESH" in
-                    fresh) ;;
-                    stale)
-                        echo "Error: блок изменился после комментария — полный откат вернул бы старый снапшот" >&2
-                        echo "       и стёр чужие правки и подсветку. Откат не применён." >&2
-                        echo "       Снять только свой тред, не трогая сегменты: buildin-pages.sh comment-rollback $FILE --narrow" >&2
-                        exit 1
-                        ;;
-                    *)
-                        echo "Error: блока из файла отката нет на странице — сверить не с чем, откат не применён." >&2
-                        echo "       Снять только свой тред: buildin-pages.sh comment-rollback $FILE --narrow" >&2
-                        exit 1
-                        ;;
-                esac
+            if ! buildin GET "/api/docs/$CHECK_PAGE" > "$RB_DIR/doc.json"; then
+                echo "Error: не удалось прочитать страницу, чтобы сверить блок с файлом отката — откат не применён." >&2
+                exit 1
             fi
+            # Применяем только при явном fresh: сбой сверки не должен
+            # превращаться в откат вслепую.
+            FRESH=$(python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-fresh -- "$FILE" "$RB_DIR/doc.json")
+            case "$FRESH" in
+                fresh) ;;
+                stale)
+                    echo "Error: блок изменился после комментария — полный откат вернул бы старый снапшот" >&2
+                    echo "       и стёр чужие правки и подсветку. Откат не применён." >&2
+                    echo "       Снять только свой тред, не трогая сегменты: buildin-pages.sh comment-rollback $FILE --narrow" >&2
+                    exit 1
+                    ;;
+                *)
+                    echo "Error: блока из файла отката нет на странице — сверить не с чем, откат не применён." >&2
+                    echo "       Снять только свой тред: buildin-pages.sh comment-rollback $FILE --narrow" >&2
+                    exit 1
+                    ;;
+            esac
         fi
 
         # Конверт собирается заново общим transaction(): в сеть уходит одна

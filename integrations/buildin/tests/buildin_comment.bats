@@ -793,19 +793,24 @@ reply_verdict() { python3 "$OPS_PY" --reply-verdict -- "$1" "$THREAD" "$2"; }
 # ---- проверка файла отката --------------------------------------------------
 
 # Файл отката из массива операций $1 — тем же конвертом, что пишет команда.
-mkrollback() {
+mkrollback() { # $1 — операции, $2 — сверка check (необязательна)
     python3 -c "
 import json, sys
-print(json.dumps({'requestId': 'r', 'transactions': [
-    {'id': 't', 'spaceId': sys.argv[2], 'operations': json.loads(sys.argv[1])}]}))
-" "$1" "$SPACE" > "$BATS_TEST_TMPDIR/rb.json"
+body = {'requestId': 'r', 'transactions': [
+    {'id': 't', 'spaceId': sys.argv[2], 'operations': json.loads(sys.argv[1])}]}
+if sys.argv[3]:
+    body['check'] = json.loads(sys.argv[3])
+print(json.dumps(body))
+" "$1" "$SPACE" "${2:-}" > "$BATS_TEST_TMPDIR/rb.json"
 }
 check_rb() { python3 "$OPS_PY" --check-rollback -- "$BATS_TEST_TMPDIR/rb.json"; }
 
 @test "rollback files of comment and comment-reply pass the check unchanged" {
     mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
-    ops=$(build "beta" "note" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
-    mkrollback "$ops"
+    built=$(build "beta" "note")
+    ops=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
+    after=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['segments_after']))")
+    mkrollback "$ops" "{\"page\": \"55555555-5555-4555-8555-555555555555\", \"block\": \"$BLOCK\", \"segments\": $after}"
     [ "$(check_rb | python3 -c "import json, sys; r = json.load(sys.stdin); print(r['space'], json.dumps(r['ops']))")" = "$SPACE $ops" ]
     mkthread false
     ops=$(reply "ответ" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
@@ -821,6 +826,12 @@ d = "66666666-6666-4666-8666-666666666666"
 def tx(ops, space=space):
     return {"requestId": "r", "transactions": [{"id": "t", "spaceId": space, "operations": ops}]}
 ok_op = {"id": block, "command": "update", "table": "block", "path": [], "args": {}}
+page = "55555555-5555-4555-8555-555555555555"
+def data_op(bid, text):
+    return {"id": bid, "command": "update", "table": "block", "path": ["data"],
+            "args": {"segments": [{"text": text, "type": 0, "enhancer": {}}]}}
+def check(bid, text):
+    return {"page": page, "block": bid, "segments": [{"text": t, "type": 0, "enhancer": {}} for t in text.split("|")]}
 cases = [
     ({"requestId": "r"}, "нет ровно одной транзакции"),
     ({"transactions": tx([ok_op])["transactions"] * 2}, "нет ровно одной транзакции"),
@@ -842,6 +853,12 @@ cases = [
     (tx([{"id": d, "command": "update", "table": "discussion", "path": [], "args": {"status": 1}}]),
      "только гасит"),
     (dict(tx([ok_op]), check={"page": "x"}), "check не по формату"),
+    # подложенные файлы: архивация страницы и чужой текст в блок
+    (tx([dict(ok_op, args={"status": -1})]), "update блока меняет не только метки времени"),
+    (tx([dict(ok_op, args={"title": "x"})]), "update блока меняет не только метки времени"),
+    (tx([data_op(block, "alpha beta")]), "без сверки"),
+    (dict(tx([data_op(d, "alpha beta")]), check=check(block, "alpha beta")), "сегменты возвращаются блоку"),
+    (dict(tx([data_op(block, "ВЗЛОМ")]), check=check(block, "alpha beta")), "меняет текст блока"),
 ]
 bad = []
 for body, want in cases:
@@ -866,12 +883,10 @@ PY
 
 @test "rollback check hands over the narrow ops and the freshness data" {
     mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
-    ops=$(build "beta" "note" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
-    python3 -c "
-import json, sys
-print(json.dumps({'requestId': 'r', 'transactions': [{'id': 't', 'spaceId': sys.argv[2], 'operations': json.loads(sys.argv[1])}],
-                  'check': {'page': sys.argv[3], 'block': sys.argv[4], 'segments': []}}))
-" "$ops" "$SPACE" "55555555-5555-4555-8555-555555555555" "$BLOCK" > "$BATS_TEST_TMPDIR/rb.json"
+    built=$(build "beta" "note")
+    ops=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
+    after=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['segments_after']))")
+    mkrollback "$ops" "{\"page\": \"55555555-5555-4555-8555-555555555555\", \"block\": \"$BLOCK\", \"segments\": $after}"
     result=$(check_rb | python3 -c "
 import json, sys
 r = json.load(sys.stdin)

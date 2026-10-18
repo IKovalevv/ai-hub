@@ -763,7 +763,14 @@ def rollback_op_problem(op):
             return "update data — не возврат segments блока"
         return None
     if command == "update" and path == []:
-        if table not in ("block", "discussion", "comment"):
+        if table == "block":
+            # Блоку откат ставит только метку правки. status у блока — это
+            # архивация страницы (ровно так её делает archive), и подложенный
+            # файл отката не должен уметь её повторить.
+            if not set(args) <= {"updatedAt", "updatedBy"}:
+                return "update блока меняет не только метки времени: %s" % sorted(args)
+            return None
+        if table not in ("discussion", "comment"):
             return "update таблицы %s" % table
         if not set(args) <= {"status", "updatedAt", "updatedBy"}:
             return "update меняет не только status и метки времени: %s" % sorted(args)
@@ -800,7 +807,32 @@ def check_rollback(body):
             isinstance(check, dict) and UUID_RE.match(str(check.get("page", "")))
             and UUID_RE.match(str(check.get("block", ""))) and isinstance(check.get("segments"), list)):
         raise RollbackError("служебный ключ check не по формату: нужны page, block и segments.")
+    for op in ops:
+        if op.get("path") == ["data"]:
+            check_segments_restore(op, check)
     return space, ops, check
+
+
+def check_segments_restore(op, check):
+    """Возврат сегментов допустим только тот, что пишет comment, — иначе RollbackError.
+
+    Операция над сегментами — запись произвольного содержимого в блок, и одна
+    её форма в файле ничего не гарантирует. Настоящий откат возвращает тот
+    блок, по которому сверка, и меняет в нём только разметку: разрез якоря
+    текст не трогает. Поэтому без сверки возврат не применяется вовсе, а со
+    сверкой — только тому же блоку и только с тем же видимым текстом.
+    """
+    if check is None:
+        raise RollbackError(
+            "возврат сегментов без сверки (ключ check) не применяется: сверить блок и "
+            "текст не с чем. Файл записан до появления сверки — посмотрите блок и при "
+            "необходимости примените откат вручную через buildin.sh.")
+    if op["id"] != check["block"]:
+        raise RollbackError("сегменты возвращаются блоку %s, а сверка — по блоку %s."
+                            % (op["id"], check["block"]))
+    if segment_text(op["args"]["segments"]) != segment_text(check["segments"]):
+        raise RollbackError("возврат сегментов меняет текст блока, а откат комментария "
+                            "возвращает только разметку.")
 
 
 def rollback_freshness(check, doc):

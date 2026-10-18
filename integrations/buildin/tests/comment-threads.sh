@@ -411,7 +411,12 @@ RB="$TMP/rb-unverified.json"
 RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
 python3 -c "
 import json
-b = json.load(open('$RB')); b['check']['block'] = '$OTHER'; json.dump(b, open('$RB', 'w'))"
+b = json.load(open('$RB'))
+for o in b['transactions'][0]['operations']:
+    if o['id'] == b['check']['block']:
+        o['id'] = '$OTHER'
+b['check']['block'] = '$OTHER'
+json.dump(b, open('$RB', 'w'))"
 RC2=$(run_sub comment-rollback "$RB")
 if [ "$RC2" -eq 1 ] && ! sent && stderr | grep -q 'нет на странице'; then
     ok "блока из файла нет на странице — полный откат не применён"
@@ -425,10 +430,10 @@ python3 -c "
 import json
 b = json.load(open('$RB')); b.pop('check'); json.dump(b, open('$RB', 'w'))"
 RC2=$(run_sub comment-rollback "$RB")
-if [ "$RC2" -eq 0 ] && sent && stderr | grep -q 'нет данных для сверки'; then
-    ok "старый файл без сверки применяется с предупреждением"
+if [ "$RC2" -eq 1 ] && ! sent && [ -e "$RB" ] && stderr | grep -q 'без сверки'; then
+    ok "файл без сверки сегменты не возвращает: проверить в нём нечего"
 else
-    fail "старый файл без сверки (rc=$RC2): $(stderr | head -2)"
+    fail "файл без сверки применён (rc=$RC2): $(stderr | head -2)"
 fi
 
 RB="$TMP/rb-reply-apply.json"
