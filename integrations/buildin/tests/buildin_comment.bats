@@ -373,6 +373,12 @@ print('|'.join(s['text'] for s in seg_op['args']['segments']),
     [ "$result" = "флаг |--force| включает режим '-- не согласен'" ]
 }
 
+@test "a mode flag with a value is rejected, not taken for the mode" {
+    mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
+    err=$(python3 "$OPS_PY" --verdict=yes -- "$DOC" "$DOC" "$BLOCK" "x" 2>&1 >/dev/null) || true
+    [[ "$err" == *"неизвестный флаг: --verdict=yes"* ]]
+}
+
 @test "unknown flag before the marker is still rejected" {
     mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
     err=$(python3 "$OPS_PY" --nope -- "$DOC" "$BLOCK" "beta" "note" "$NOW" "$USER" 2>&1 >/dev/null) || true

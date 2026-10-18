@@ -816,56 +816,6 @@ def rollback_freshness(check, doc):
     return "fresh" if ((block.get("data") or {}).get("segments") or []) == check["segments"] else "stale"
 
 
-# Режимы билдера: режим → число позиционных аргументов после «--».
-ARITY = {
-    "build": 6,            # <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
-    "verdict": 4,          # <before_json> <after_json> <block_id> <discussion_id>
-    "reply": 5,            # <doc_json> <discussion_id> <text> <now_ms> <user_id>
-    "reply-verdict": 3,    # <after_json> <discussion_id> <comment_id>
-    "resolve": 2,          # <doc_json> <discussion_id>
-    "resolve-verdict": 2,  # <after_json> <discussion_id>
-    "check-rollback": 1,   # <rollback_file>
-    "rollback-fresh": 2,   # <rollback_file> <doc_json>
-}
-
-
-def parse_args(argv):
-    """(режим, позиционные, опции); ошибка разбора — SystemExit с причиной."""
-    positional, end_of_opts, mode = [], False, "build"
-    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None, "page": None}
-    for a in argv:
-        if end_of_opts or not a.startswith("--"):
-            positional.append(a)
-        elif a == "--":
-            # Всё после «--» — значения. Без этого якорь или текст с ведущими
-            # дефисами («--force», «-- не согласен») не доходит до билдера
-            # никакой формой ввода: они едут через argv, в том числе из @file.
-            end_of_opts = True
-        elif a in ("--verdict", "--reply", "--reply-verdict", "--check-rollback", "--rollback-fresh"):
-            mode = a[2:]
-        elif a.split("=", 1)[0] in ("--resolve", "--resolve-verdict"):
-            flag, _, raw = a.partition("=")
-            if raw not in ("true", "false"):
-                raise SystemExit("Error: %s ожидает true или false, получено: %r" % (flag, raw))
-            mode, opts["resolved"] = flag[2:], raw == "true"
-        elif a.startswith("--occurrence="):
-            raw = a.split("=", 1)[1]
-            if not raw.isdigit() or int(raw) < 1:
-                raise SystemExit("Error: --occurrence ожидает целое число >= 1, получено: %r" % raw)
-            opts["occurrence"] = int(raw)
-        elif a.startswith("--mention="):
-            opts["mentions"].append(a.split("=", 1)[1])
-        elif a.startswith("--members="):
-            opts["members"] = a.split("=", 1)[1]
-        elif a.startswith("--page="):
-            opts["page"] = a.split("=", 1)[1]
-        else:
-            raise SystemExit("Error: неизвестный флаг: %s" % a)
-    if len(positional) != ARITY[mode]:
-        raise SystemExit(__doc__.strip())
-    return mode, positional, opts
-
-
 def load_doc(path):
     """Ответ /api/docs или пустой документ, если это не JSON (конверт ошибки)."""
     try:
@@ -897,44 +847,116 @@ def build_comment(args, opts):
                      mentions_from(opts), opts["page"])
 
 
+# Обработчики режимов: каждый получает позиционные аргументы и опции и сам
+# печатает результат.
+
+def run_build(args, opts):
+    # Без ensure_ascii=False: вывод разбирает json.load, ему \uXXXX всё
+    # равно, а печать не-ASCII падает под не-UTF-8 локалью (LC_ALL=C).
+    print(json.dumps(build_comment(args, opts)))
+
+
+def run_verdict(args, opts):
+    before_path, after_path, block_id, ours = args
+    status, lost = verdict(load_doc(before_path), load_doc(after_path), block_id, ours)
+    print(status)
+    print(" ".join(lost))
+
+
+def run_reply(args, opts):
+    doc_json, discussion_id, text, now, user_id = args
+    thread = live_thread(load_doc(doc_json), discussion_id)
+    print(json.dumps(build_reply_ops(thread, discussion_id, text, int(now), user_id,
+                                     mentions_from(opts))))
+
+
+def run_reply_verdict(args, opts):
+    after_path, discussion_id, comment_id = args
+    print(reply_verdict(load_doc(after_path), discussion_id, comment_id))
+
+
+def run_resolve(args, opts):
+    doc_json, discussion_id = args
+    thread = live_thread(load_doc(doc_json), discussion_id)
+    ops = build_resolve_ops(thread, discussion_id, opts["resolved"])
+    print(json.dumps({"ops": ops, "space": thread.get("spaceId", "")}))
+
+
+def run_resolve_verdict(args, opts):
+    after_path, discussion_id = args
+    print(resolve_verdict(load_doc(after_path), discussion_id, opts["resolved"]))
+
+
+def run_check_rollback(args, opts):
+    space, ops, check = check_rollback(load_doc(args[0]))
+    # Узкий откат — без возврата сегментов: только снять свой тред.
+    # Осиротевший id треда на сегменте Buildin не подсвечивает
+    # (проверено живьём), поэтому сегменты можно не трогать.
+    narrow = [op for op in ops if op.get("path") != ["data"]]
+    print(json.dumps({"space": space, "ops": ops, "narrow_ops": narrow, "check": check}))
+
+
+def run_rollback_fresh(args, opts):
+    _, _, check = check_rollback(load_doc(args[0]))
+    print(rollback_freshness(check, load_doc(args[1])) if check else "no-check")
+
+
+# Режимы билдера — одной таблицей: режим → (число позиционных после «--»,
+# обработчик, берёт ли флаг значение true|false). Новый режим — одна строка
+# здесь: раньше он регистрировался в трёх местах, и забытое всплывало только
+# при вызове. build — режим по умолчанию, своего флага у него нет.
+MODES = {
+    "build": (6, run_build, False),                     # <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
+    "verdict": (4, run_verdict, False),                 # <before_json> <after_json> <block_id> <discussion_id>
+    "reply": (5, run_reply, False),                     # <doc_json> <discussion_id> <text> <now_ms> <user_id>
+    "reply-verdict": (3, run_reply_verdict, False),     # <after_json> <discussion_id> <comment_id>
+    "resolve": (2, run_resolve, True),                  # <doc_json> <discussion_id>
+    "resolve-verdict": (2, run_resolve_verdict, True),  # <after_json> <discussion_id>
+    "check-rollback": (1, run_check_rollback, False),   # <rollback_file>
+    "rollback-fresh": (2, run_rollback_fresh, False),   # <rollback_file> <doc_json>
+}
+
+
+def parse_args(argv):
+    """(режим, позиционные, опции); ошибка разбора — SystemExit с причиной."""
+    positional, end_of_opts, mode = [], False, "build"
+    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None, "page": None}
+    for a in argv:
+        flag, has_value, raw = a.partition("=")
+        if end_of_opts or not a.startswith("--"):
+            positional.append(a)
+        elif a == "--":
+            # Всё после «--» — значения. Без этого якорь или текст с ведущими
+            # дефисами («--force», «-- не согласен») не доходит до билдера
+            # никакой формой ввода: они едут через argv, в том числе из @file.
+            end_of_opts = True
+        elif flag[2:] in MODES and flag != "--build":
+            mode = flag[2:]
+            if MODES[mode][2]:
+                if raw not in ("true", "false"):
+                    raise SystemExit("Error: %s ожидает true или false, получено: %r" % (flag, raw))
+                opts["resolved"] = raw == "true"
+            elif has_value:
+                raise SystemExit("Error: неизвестный флаг: %s" % a)
+        elif flag == "--occurrence" and has_value:
+            if not raw.isdigit() or int(raw) < 1:
+                raise SystemExit("Error: --occurrence ожидает целое число >= 1, получено: %r" % raw)
+            opts["occurrence"] = int(raw)
+        elif flag == "--mention" and has_value:
+            opts["mentions"].append(raw)
+        elif flag in ("--members", "--page") and has_value:
+            opts[flag[2:]] = raw
+        else:
+            raise SystemExit("Error: неизвестный флаг: %s" % a)
+    if len(positional) != MODES[mode][0]:
+        raise SystemExit(__doc__.strip())
+    return mode, positional, opts
+
+
 def main():
     mode, args, opts = parse_args(sys.argv[1:])
     try:
-        if mode == "verdict":
-            before_path, after_path, block_id, ours = args
-            status, lost = verdict(load_doc(before_path), load_doc(after_path), block_id, ours)
-            print(status)
-            print(" ".join(lost))
-        elif mode == "reply":
-            doc_json, discussion_id, text, now, user_id = args
-            thread = live_thread(load_doc(doc_json), discussion_id)
-            print(json.dumps(build_reply_ops(thread, discussion_id, text, int(now), user_id,
-                                             mentions_from(opts))))
-        elif mode == "reply-verdict":
-            after_path, discussion_id, comment_id = args
-            print(reply_verdict(load_doc(after_path), discussion_id, comment_id))
-        elif mode == "resolve":
-            doc_json, discussion_id = args
-            thread = live_thread(load_doc(doc_json), discussion_id)
-            ops = build_resolve_ops(thread, discussion_id, opts["resolved"])
-            print(json.dumps({"ops": ops, "space": thread.get("spaceId", "")}))
-        elif mode == "resolve-verdict":
-            after_path, discussion_id = args
-            print(resolve_verdict(load_doc(after_path), discussion_id, opts["resolved"]))
-        elif mode == "check-rollback":
-            space, ops, check = check_rollback(load_doc(args[0]))
-            # Узкий откат — без возврата сегментов: только снять свой тред.
-            # Осиротевший id треда на сегменте Buildin не подсвечивает
-            # (проверено живьём), поэтому сегменты можно не трогать.
-            narrow = [op for op in ops if op.get("path") != ["data"]]
-            print(json.dumps({"space": space, "ops": ops, "narrow_ops": narrow, "check": check}))
-        elif mode == "rollback-fresh":
-            _, _, check = check_rollback(load_doc(args[0]))
-            print(rollback_freshness(check, load_doc(args[1])) if check else "no-check")
-        else:
-            # Без ensure_ascii=False: вывод разбирает json.load, ему \uXXXX всё
-            # равно, а печать не-ASCII падает под не-UTF-8 локалью (LC_ALL=C).
-            print(json.dumps(build_comment(args, opts)))
+        MODES[mode][1](args, opts)
     except (AnchorError, ThreadError) as e:
         raise SystemExit("Error: %s" % e)
     except RollbackError as e:
