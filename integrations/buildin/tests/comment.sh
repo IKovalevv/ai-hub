@@ -274,7 +274,9 @@ fi
 if stdout | python3 -c "
 import json, sys
 ops = json.load(sys.stdin)
-assert [o['command'] for o in ops] == ['set','set','update','listAfter','update'], ops
+assert [o['command'] for o in ops] == ['set','set','update','listAfter','update','update'], ops
+# как UI: правкой отмечается и страница, а не только блок
+assert ops[4]['id'] == '$PAGE' and set(ops[4]['args']) == {'updatedAt', 'updatedBy'}, ops[4]
 " 2>/dev/null; then
     ok "--dry-run напечатал операции транзакции"
 else

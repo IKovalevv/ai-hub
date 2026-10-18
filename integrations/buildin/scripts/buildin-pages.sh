@@ -619,7 +619,7 @@ if not found:
         # «--» обязателен: без него якорь или текст с ведущими дефисами билдер
         # примет за флаг, и файловая форма ввода от этого не спасает.
         BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" \
-            ${OCCURRENCE:+--occurrence="$OCCURRENCE"} ${MENTION_ARGS[@]+"${MENTION_ARGS[@]}"} -- \
+            ${OCCURRENCE:+--occurrence="$OCCURRENCE"} ${MENTION_ARGS[@]+"${MENTION_ARGS[@]}"} --page="$PAGE_ID" -- \
             "$DOC_FILE" "$BLOCK_ID" "$ANCHOR" "$TEXT" "$NOW" "$USER_ID")
 
         if [[ -n "$DRY_RUN" ]]; then

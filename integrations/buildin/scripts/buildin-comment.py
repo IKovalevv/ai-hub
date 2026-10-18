@@ -42,7 +42,7 @@
 ни ответ, ни резолв не трогают ни сегменты, ни список тредов блока.
 
 Usage:
-    buildin-comment.py [--occurrence=N] [--mention=<uuid>... --members=<file>] --
+    buildin-comment.py [--occurrence=N] [--mention=<uuid>... --members=<file>] [--page=<page_id>] --
                        <doc_json> <block_id> <anchor> <text> <now_ms> <user_id>
     buildin-comment.py --verdict -- <before_json> <after_json> <block_id> <discussion_id>
     buildin-comment.py --reply [--mention=<uuid>... --members=<file>] --
@@ -57,6 +57,7 @@ Usage:
 --mention — uuid участника, которого упомянуть в начале сообщения (можно
             несколько); --members — файл с ответом /api/spaces/<space>/members
             для их сверки.
+--page — страница блока: как и UI, комментарий обновляет её updatedAt.
 """
 import copy
 import json
@@ -505,7 +506,7 @@ def comment_record(comment_id, space_id, discussion_id, segments, who):
     }
 
 
-def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None, mentions=()):
+def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None, mentions=(), page_id=None):
     """Операции транзакции и операции отката. Без сети и без записи на диск."""
     if not text:
         raise AnchorError("Текст комментария пустой — нечего отправлять.")
@@ -546,6 +547,11 @@ def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None, ment
         {"id": block_id, "command": "update", "table": "block", "path": [],
          "args": {"updatedAt": now, "updatedBy": user_id}},
     ]
+    if page_id:
+        # Ровно как UI (снято с живой страницы): комментарий отмечается правкой
+        # и самой страницы, а не только блока.
+        ops.insert(-1, {"id": page_id, "command": "update", "table": "block", "path": [],
+                        "args": {"updatedAt": now, "updatedBy": user_id}})
 
     # Снятие созданных записей: тред вон из списка блока, сам тред и сообщение
     # гасятся (status -1 — конвенция удаления в этом плагине), чтобы после
@@ -797,7 +803,7 @@ ARITY = {
 def parse_args(argv):
     """(режим, позиционные, опции); ошибка разбора — SystemExit с причиной."""
     positional, end_of_opts, mode = [], False, "build"
-    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None}
+    opts = {"occurrence": None, "resolved": None, "mentions": [], "members": None, "page": None}
     for a in argv:
         if end_of_opts or not a.startswith("--"):
             positional.append(a)
@@ -822,6 +828,8 @@ def parse_args(argv):
             opts["mentions"].append(a.split("=", 1)[1])
         elif a.startswith("--members="):
             opts["members"] = a.split("=", 1)[1]
+        elif a.startswith("--page="):
+            opts["page"] = a.split("=", 1)[1]
         else:
             raise SystemExit("Error: неизвестный флаг: %s" % a)
     if len(positional) != ARITY[mode]:
@@ -857,7 +865,7 @@ def build_comment(args, opts):
             "Идентификаторы блоков — поле uuid в выводе `buildin-pages.sh get-blocks`." % block_id
         )
     return build_ops(block, block_id, anchor, text, int(now), user_id, opts["occurrence"],
-                     mentions_from(opts))
+                     mentions_from(opts), opts["page"])
 
 
 def main():

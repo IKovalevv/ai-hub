@@ -138,6 +138,15 @@ print(len(ops),
     [ "$result" = "5 update data ['segments'] listAfter discussions" ]
 }
 
+@test "with --page the page is touched like the UI does, right before the block" {
+    mkdoc '[{"text": "alpha beta gamma", "type": 0, "enhancer": {}}]'
+    result=$(build "beta" "note" "--page=55555555-5555-4555-8555-555555555555" | python3 -c "
+import json, sys
+ops = json.load(sys.stdin)['ops']
+print(len(ops), [(o['id'][:8], o['command'], o['path']) for o in ops[-2:]], sorted(ops[-2]['args']))")
+    [ "$result" = "6 [('55555555', 'update', []), ('11111111', 'update', [])] ['updatedAt', 'updatedBy']" ]
+}
+
 @test "discussion and comment records are created before the block is touched" {
     mkdoc '[{"text": "alpha beta gamma", "type": 0, "enhancer": {}}]'
     result=$(build "beta" "note" | probe "print(disc['table'], comment['table'], seg_op['table'])")
