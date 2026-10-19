@@ -10,6 +10,10 @@ set -u
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$TESTS_DIR/../scripts"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+# Свой TMPDIR: команды кладут туда дефолтный файл отката, и без подмены каждый
+# прогон оставлял их в настоящем временном каталоге — набрались тысячи.
+export TMPDIR="$TMP/tmpdir"
+mkdir -p "$TMPDIR"
 FAILS=0
 
 fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
