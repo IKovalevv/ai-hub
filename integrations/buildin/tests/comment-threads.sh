@@ -744,6 +744,44 @@ else
     fail "comments и упоминание страницы (rc=$RC, запросов /api/blocks=$BLOCK_GETS): $GOT"
 fi
 
+# read и comments печатают инлайн-сегменты одним модулем: дату — датой, а не
+# заглушкой «‣», упоминания — @ником и ссылкой. Участник без ника — коротким
+# id: почта в контекст агента не попадает.
+python3 - "$TMP/state.json" "$PAGE" "$BLOCK" "$THREAD" "$SPACE" "$OTHER" "$NONICK" "$MENTIONED" <<'FIX'
+import json, sys
+path, page, block, thread, space, other, nonick, mentioned = sys.argv[1:9]
+text = lambda t: {"text": t, "type": 0, "enhancer": {}}
+person = lambda uid: {"text": "", "type": 7, "uuid": uid, "enhancer": {}}
+segs = [text("Дата: "),
+        {"text": "‣", "type": 1, "startDate": "2026/10/16", "startTime": "14:30", "endDate": "", "dateFormat": "relative"},
+        text(", кто: "), person(other), text(", без ника: "), person(nonick),
+        text(", страница: "), {"text": "", "type": 4, "uuid": mentioned, "enhancer": {}},
+        text(", "), {"text": "жирно", "type": 0, "enhancer": {"bold": True}}]
+cid = "99999999-0000-4000-8000-00000000000a"
+state = {"code": 200, "data": {
+    "blocks": {page: {"uuid": page, "spaceId": space, "type": 0, "title": "Страница", "subNodes": [block]},
+               block: {"uuid": block, "spaceId": space, "type": 1, "discussions": [thread], "data": {"segments": segs}}},
+    "discussions": {thread: {"uuid": thread, "spaceId": space, "parentId": block, "status": 1,
+                             "resolved": False, "comments": [cid]}},
+    "comments": {cid: {"uuid": cid, "spaceId": space, "parentId": thread, "status": 1,
+                       "createdBy": nonick, "text": [person(nonick), text("посмотри")]}}}}
+json.dump(state, open(path, "w"), ensure_ascii=False)
+FIX
+LINE="Дата: 2026-10-16 14:30, кто: @j.doe, без ника: @77777777, страница: [Страница B](https://buildin.ai/$SPACE/$MENTIONED)"
+RC=$(run_sub read "$PAGE")
+if [ "$RC" -eq 0 ] && stdout | grep -qxF "$LINE, **жирно**" && ! stdout | grep -q 'example.com'; then
+    ok "read: дата, упоминания человека и страницы, без ника — короткий id"
+else
+    fail "read и инлайн-сегменты (rc=$RC): $(stdout | sed -n 3p) $(stderr | tail -2)"
+fi
+RC=$(run_sub comments "$PAGE")
+if [ "$RC" -eq 0 ] && stdout | grep -qxF "Текст блока: $LINE, жирно" && stdout | grep -qxF -- "- 77777777 (?): @77777777 посмотри" \
+   && ! stdout | grep -q 'example.com'; then
+    ok "comments: те же сегменты тем же модулем, автор без ника — короткий id"
+else
+    fail "comments и инлайн-сегменты (rc=$RC): $(stdout | head -6) $(stderr | tail -2)"
+fi
+
 write_thread_fixture false
 RC=$(run_sub comment-resolve "$PAGE" "$THREAD" "--mention=$OTHER")
 if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --mention'; then
@@ -757,7 +795,8 @@ fi
 write_fixture
 for FORM in "$PAGE" "https://buildin.ai/$SPACE/$PAGE"; do
     RC=$(run_sub members "$FORM")
-    if [ "$RC" -eq 0 ] && ! sent && [ "$(stdout)" = "user-1  agent
+    if [ "$RC" -eq 0 ] && ! sent && [ "$(stdout)" = "$NONICK
+user-1  agent
 $OTHER  j.doe" ] && ! stdout | grep -q '@'; then
         ok "members ($FORM): uuid и ник участников, без почт"
     else

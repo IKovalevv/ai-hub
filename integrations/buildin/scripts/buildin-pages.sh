@@ -266,11 +266,18 @@ print(json.dumps(result, indent=2, ensure_ascii=False))
         buildin GET "/api/docs/$PAGE_ID" | python3 -c "
 import json, sys
 
-page_id = sys.argv[1]
+page_id, script_dir = sys.argv[1:3]
+sys.path.insert(0, script_dir)
+from buildin_segments import Inline
+
 data = json.load(sys.stdin).get('data', {})
 blocks = data.get('blocks', {})
 page = blocks.get(page_id, {})
 title = page.get('title', '(untitled)')
+# Даты, упоминания людей и страниц печатает общий с comments модуль: своя
+# копия здесь их теряла — на месте упоминания оставалась пустота, на месте
+# даты заглушка «‣».
+inline = Inline(blocks, page.get('spaceId', ''), script_dir + '/buildin.sh')
 print(f'# {title}')
 print()
 
@@ -279,18 +286,7 @@ print()
 #              21=bookmark, 23=equation, 25=code, 27=table (rows=28),
 #              38=toggle-heading
 def rt(segments):
-    parts = []
-    for s in (segments or []):
-        text = s.get('text', '')
-        enh = s.get('enhancer', {})
-        url = s.get('url', '')
-        if enh.get('code'): text = f'\`{text}\`'
-        elif enh.get('bold'): text = f'**{text}**'
-        elif enh.get('italic'): text = f'*{text}*'
-        if url:
-            text = f'[{text}]({url})'
-        parts.append(text)
-    return ''.join(parts)
+    return inline.text(segments, markup=True)
 
 def render(node_ids, indent=0):
     pfx = '  ' * indent
@@ -400,7 +396,7 @@ def render(node_ids, indent=0):
             render(sub, indent + 1)
 
 render(page.get('subNodes', []))
-" "$PAGE_ID"
+" "$PAGE_ID" "$SCRIPT_DIR"
         ;;
 
     publish-md)

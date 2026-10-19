@@ -25,10 +25,12 @@ SPACE=33333333-3333-4333-8333-333333333333
 OTHER=44444444-4444-4444-4444-444444444444
 # Страница, которую упоминают в комментарии: её название отдаёт /api/blocks.
 MENTIONED=55555555-5555-4555-8555-555555555555
+# Участник без ника: в выводе вместо него короткий id, его почта не печатается.
+NONICK=77777777-0000-4000-8000-0000000000aa
 
 mkdir -p "$TMP/scripts" "$TMP/log"
 cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
-   "$SRC_DIR/buildin-comment.py" "$TMP/scripts/"
+   "$SRC_DIR/buildin-comment.py" "$SRC_DIR/buildin_segments.py" "$TMP/scripts/"
 
 # Состояние страницы: один блок с тремя сегментами — обычный, code, хвост.
 # «лимит» встречается дважды (в «безлимитный» и отдельно) — материал для
@@ -145,7 +147,7 @@ case "\$ENDPOINT" in
     /api/spaces/$SPACE/members)
         if [ -n "\${STUB_FAIL_MEMBERS:-}" ]; then echo "Error: HTTP 403" >&2; exit 1; fi
         if [ -n "\${STUB_MEMBERS_ENVELOPE:-}" ]; then echo '{"code":403,"msg":"stub: forbidden"}'; exit 0; fi
-        echo '{"code":200,"data":[{"user":{"uuid":"$OTHER","nickname":"j.doe","email":"j.doe@example.com"}},{"user":{"uuid":"user-1","nickname":"agent"}}]}' ;;
+        echo '{"code":200,"data":[{"user":{"uuid":"$OTHER","nickname":"j.doe","email":"j.doe@example.com"}},{"user":{"uuid":"user-1","nickname":"agent"}},{"user":{"uuid":"$NONICK","email":"nonick@example.com"}}]}' ;;
     /api/docs/$PAGE)
         if [ -n "\${STUB_FAIL_DOCS:-}" ]; then echo "Error: HTTP 503" >&2; exit 1; fi
         N=\$(cat "\$LOG_DIR/getn" 2>/dev/null || echo 0); N=\$((N + 1)); echo "\$N" > "\$LOG_DIR/getn"

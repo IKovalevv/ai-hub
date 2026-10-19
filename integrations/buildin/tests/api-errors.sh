@@ -114,7 +114,7 @@ expect_fail "HTTP 500 — прежняя ветка"              '{"code":200}'
 PAGES_DIR="$TMP/pages"
 mkdir -p "$PAGES_DIR/scripts" "$PAGES_DIR/log"
 cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
-   "$SRC_DIR/buildin-blocks.py" "$PAGES_DIR/scripts/"
+   "$SRC_DIR/buildin-blocks.py" "$SRC_DIR/buildin_segments.py" "$PAGES_DIR/scripts/"
 
 cat > "$PAGES_DIR/scripts/buildin.sh" <<STUB
 #!/usr/bin/env bash
@@ -187,7 +187,8 @@ fi
 # На пустом stdin он валится JSONDecodeError и забивает трейсбеком то самое
 # внятное сообщение, ради которого всё делалось.
 cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
-   "$SRC_DIR/buildin-nav.sh" "$SRC_DIR/buildin-blocks.py" "$API_ROOT/integrations/buildin/scripts/"
+   "$SRC_DIR/buildin-nav.sh" "$SRC_DIR/buildin-blocks.py" "$SRC_DIR/buildin_segments.py" \
+   "$API_ROOT/integrations/buildin/scripts/"
 
 PAGES="$API_ROOT/integrations/buildin/scripts/buildin-pages.sh"
 NAV="$API_ROOT/integrations/buildin/scripts/buildin-nav.sh"
