@@ -709,6 +709,41 @@ else
     fail "comments и формы упоминания (rc=$RC): $GOT"
 fi
 
+# Упоминание страницы — сегмент type 4 с одним uuid. Название берётся из
+# /api/docs, если страница там есть (так приходят родители), иначе одним
+# запросом /api/blocks на страницу. Нет страницы — ссылка. Не-UUID из чужого
+# текста в запрос не уходит.
+PARENT=66666666-0000-4000-8000-000000000001
+MISSING=66666666-0000-4000-8000-000000000002
+python3 - "$TMP/state.json" "$BLOCK" "$THREAD" "$SPACE" "$MENTIONED" "$PARENT" "$MISSING" <<'FIX'
+import json, sys
+path, block, thread, space, mentioned, parent, missing = sys.argv[1:8]
+page = lambda uid: {"text": "", "type": 4, "uuid": uid, "enhancer": {}}
+text = lambda t: {"text": t, "type": 0, "enhancer": {}}
+body = [text("см. "), page(mentioned), text(", "), page(parent), text(", "), page(missing),
+        text(", снова "), page(mentioned), text(" и "), page("../spaces/x")]
+cid = "99999999-0000-4000-8000-000000000009"
+state = {"code": 200, "data": {
+    "blocks": {block: {"uuid": block, "spaceId": space, "type": 1, "discussions": [thread],
+                       "data": {"segments": [text("абзац")]}},
+               parent: {"uuid": parent, "spaceId": space, "type": 0, "title": "Родитель"}},
+    "discussions": {thread: {"uuid": thread, "spaceId": space, "parentId": block, "status": 1,
+                             "resolved": False, "comments": [cid]}},
+    "comments": {cid: {"uuid": cid, "spaceId": space, "parentId": thread, "status": 1,
+                       "createdBy": "user-1", "text": body}}}}
+json.dump(state, open(path, "w"), ensure_ascii=False)
+FIX
+RC=$(run_sub comments "$PAGE")
+GOT=$(stdout | sed -n 's/^- agent (?): //p')
+WANT="см. [Страница B](https://buildin.ai/$SPACE/$MENTIONED), [Родитель](https://buildin.ai/$SPACE/$PARENT), https://buildin.ai/$SPACE/$MISSING, снова [Страница B](https://buildin.ai/$SPACE/$MENTIONED) и (упоминание страницы)"
+BLOCK_GETS=$(grep -c "^GET /api/blocks/" "$TMP/log/calls.txt" || true)
+if [ "$RC" -eq 0 ] && [ "$GOT" = "$WANT" ] && [ "$BLOCK_GETS" -eq 2 ] \
+   && grep -q "^GET /api/blocks/$MENTIONED$" "$TMP/log/calls.txt" && grep -q "^GET /api/blocks/$MISSING$" "$TMP/log/calls.txt"; then
+    ok "comments: упоминание страницы — название, при сбое ссылка, по запросу на страницу"
+else
+    fail "comments и упоминание страницы (rc=$RC, запросов /api/blocks=$BLOCK_GETS): $GOT"
+fi
+
 write_thread_fixture false
 RC=$(run_sub comment-resolve "$PAGE" "$THREAD" "--mention=$OTHER")
 if [ "$RC" -ne 0 ] && ! sent && stderr | grep -q 'неизвестный флаг: --mention'; then

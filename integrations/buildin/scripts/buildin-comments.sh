@@ -311,10 +311,10 @@ case "$COMMAND" in
         fi
 
         python3 -c "
-import json, sys
+import json, re, subprocess, sys
 from datetime import datetime
 
-doc_file, members_file, page_id, block_id = sys.argv[1:5]
+doc_file, members_file, page_id, block_id, space_id, buildin_sh = sys.argv[1:7]
 data = json.load(open(doc_file)).get('data', {})
 blocks = data.get('blocks', {})
 discussions = data.get('discussions', {})
@@ -329,8 +329,31 @@ users = {m['user']['uuid']: m['user'].get('nickname') or m['user'].get('email', 
 def name(uuid):
     return users.get(uuid, uuid[:8] if uuid else '?')
 
+# Упоминание страницы несёт только её uuid. /api/docs кладёт в ответ лишь
+# родителей страницы (проверено живьём), остальные названия спрашиваем у
+# /api/blocks — лениво и по разу на страницу. Нет страницы или доступа —
+# печатаем ссылку. uuid пришёл из чужого текста: не-UUID в запрос не идёт,
+# иначе им можно было бы дёрнуть другой адрес API.
+pages = {}
+def page_link(uuid):
+    if not re.fullmatch('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', uuid):
+        return '(упоминание страницы)'
+    if uuid not in pages:
+        rec = blocks.get(uuid) or {}
+        if not rec.get('title'):
+            # При ошибке клиент печатает конверт без data или ничего — и то и
+            # другое даёт ссылку вместо названия.
+            run = subprocess.run([buildin_sh, 'GET', '/api/blocks/' + uuid], capture_output=True, text=True)
+            try:
+                rec = json.loads(run.stdout).get('data') or {}
+            except ValueError:
+                rec = {}
+        url = 'https://buildin.ai/' + '/'.join(x for x in (rec.get('spaceId') or space_id, uuid) if x)
+        pages[uuid] = '[%s](%s)' % (rec['title'], url) if rec.get('title') else url
+    return pages[uuid]
+
 def rt(segments):
-    # type 7 — @-упоминание человека: text пустой, uuid = user uuid
+    # type 7 — @-упоминание человека, type 4 — страницы: text пустой, есть uuid
     parts = []
     segments = segments or []
     for i, s in enumerate(segments):
@@ -339,6 +362,8 @@ def rt(segments):
             # сразу с текста. Если пробел в нём уже есть, второй дал бы «@Имя  текст».
             nxt = segments[i + 1].get('text', '') if i + 1 < len(segments) else ''
             parts.append('@' + name(s.get('uuid', '')) + ('' if nxt[:1].isspace() else ' '))
+        elif s.get('type') == 4:
+            parts.append(page_link(s.get('uuid', '')))
         else:
             parts.append(s.get('text', ''))
     return ''.join(parts).strip()
@@ -371,7 +396,7 @@ for did, disc in discussions.items():
 if not found:
     where = f'блока {block_id}' if block_id else f'страницы {page_id}'
     print(f'Комментариев у {where} нет.')
-" "$DOC_FILE" "$MEMBERS_FILE" "$PAGE_ID" "$BLOCK_ID"
+" "$DOC_FILE" "$MEMBERS_FILE" "$PAGE_ID" "$BLOCK_ID" "$SPACE_ID" "$SCRIPT_DIR/buildin.sh"
         ;;
 
     comment)

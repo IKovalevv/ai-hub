@@ -23,6 +23,8 @@ PAGE=11111111-1111-4111-8111-111111111111
 BLOCK=22222222-2222-4222-8222-222222222222
 SPACE=33333333-3333-4333-8333-333333333333
 OTHER=44444444-4444-4444-4444-444444444444
+# Страница, которую упоминают в комментарии: её название отдаёт /api/blocks.
+MENTIONED=55555555-5555-4555-8555-555555555555
 
 mkdir -p "$TMP/scripts" "$TMP/log"
 cp "$SRC_DIR/buildin-pages.sh" "$SRC_DIR/buildin-lib.sh" "$SRC_DIR/buildin-comments.sh" \
@@ -138,6 +140,8 @@ printf '%s %s\n' "\$METHOD" "\$ENDPOINT" >> "\$LOG_DIR/calls.txt"
 case "\$ENDPOINT" in
     /api/users/me)
         echo '{"code":200,"data":{"uuid":"user-1"}}' ;;
+    /api/blocks/$MENTIONED)
+        echo '{"code":200,"data":{"uuid":"$MENTIONED","spaceId":"$SPACE","title":"Страница B"}}' ;;
     /api/spaces/$SPACE/members)
         if [ -n "\${STUB_FAIL_MEMBERS:-}" ]; then echo "Error: HTTP 403" >&2; exit 1; fi
         if [ -n "\${STUB_MEMBERS_ENVELOPE:-}" ]; then echo '{"code":403,"msg":"stub: forbidden"}'; exit 0; fi
