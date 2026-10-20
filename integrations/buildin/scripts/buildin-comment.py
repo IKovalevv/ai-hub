@@ -582,16 +582,27 @@ def build_ops(block, block_id, anchor, text, now, user_id, occurrence=None, ment
     # Узкий откат — когда блок уже переписал кто-то другой. Возвращать наши
     # сегменты там нельзя: в блоке лежат чужие, и восстановление снапшота
     # стёрло бы подсветку того, кто выиграл гонку.
-    # segments_after — какими наша запись оставит сегменты блока: по ним
-    # comment-rollback узнает, не правил ли блок кто-то ещё, прежде чем
-    # возвращать снапшот.
-    return {"ops": ops, "rollback": rollback, "rollback_records": retire,
-            "segments_after": new_segments, "discussion": discussion_id, "comment": comment_id}
+    # Сверка для файла отката: сегменты, какими их оставит наша запись, — по
+    # ним comment-rollback узнает, не правил ли блок кто-то ещё. Собирается
+    # здесь, рядом с check_rollback, который её проверяет: соберёт bash —
+    # переименование поля с одной стороны всплывёт только в момент отката.
+    check = {"page": page_id, "block": block_id, "segments": new_segments}
+    return {"ops": ops, "rollback": rollback, "rollback_records": retire, "check": check,
+            "discussion": discussion_id, "comment": comment_id}
+
+
+def doc_data(doc):
+    """data из ответа /api/docs; не объект — пустая страница.
+
+    Разбор после записи не должен падать на странном ответе: упавший разбор
+    оставляет трейсбек вместо понятного «исход неизвестен»."""
+    data = doc.get("data") if isinstance(doc, dict) else None
+    return data if isinstance(data, dict) else {}
 
 
 def read_block(doc, block_id):
     """Блок из ответа /api/docs, либо None, если его там нет."""
-    blocks = (doc.get("data") or {}).get("blocks") or {}
+    blocks = doc_data(doc).get("blocks") or {}
     return blocks.get(block_id)
 
 
@@ -636,7 +647,7 @@ def verdict(before, after, block_id, ours):
 
 def find_thread(doc, discussion_id):
     """Тред из ответа /api/docs, либо None, если его там нет."""
-    return ((doc.get("data") or {}).get("discussions") or {}).get(discussion_id)
+    return (doc_data(doc).get("discussions") or {}).get(discussion_id)
 
 
 def live_thread(doc, discussion_id):
@@ -658,7 +669,7 @@ def live_thread(doc, discussion_id):
     return thread
 
 
-def build_reply_ops(thread, discussion_id, text, now, user_id, mentions=()):
+def build_reply_ops(thread, discussion_id, text, now, user_id, mentions=(), page_id=None):
     """Операции ответа в тред и их откат. Без сети и без записи на диск.
 
     Ровно то, что шлёт UI (снято с живой страницы): запись comment и listAfter
@@ -692,7 +703,8 @@ def build_reply_ops(thread, discussion_id, text, now, user_id, mentions=()):
         {"id": comment_id, "command": "update", "table": "comment", "path": [],
          "args": {"status": -1, "updatedAt": now, "updatedBy": user_id}},
     ]
-    return {"ops": ops, "rollback": rollback, "comment": comment_id,
+    # Сверка — страница: по ней comment-rollback проверит, что гасит именно ваш ответ.
+    return {"ops": ops, "rollback": rollback, "check": {"page": page_id}, "comment": comment_id,
             "discussion": discussion_id, "space": space_id}
 
 
@@ -922,7 +934,7 @@ def rollback_plan(body, doc, user_id, narrow, path):
 
     if check is None:
         return refuse("в файле нет сверки (ключ check): он записан до неё, и проверить на странице нечего.")
-    data = (doc.get("data") if isinstance(doc, dict) else None) or {}
+    data = doc_data(doc)
     tables = {"discussion": data.get("discussions") or {}, "comment": data.get("comments") or {}}
     retired = sorted(retired_records(ops))
     missing = [rid for table, rid in retired if rid not in tables[table]]
@@ -980,6 +992,12 @@ def rollback_plan(body, doc, user_id, narrow, path):
                       else "блока из файла отката нет на странице — сверить не с чем.")
             return refuse(reason, "Снять только свой тред, не трогая сегменты: "
                                   "buildin-pages.sh comment-rollback %s --narrow" % path)
+    # Узкий откат снимает тред со списка его блока. Блока нет — снимать не с
+    # чего: POST ушёл бы вслепую и кончился кодом 2, а отказ до записи точнее.
+    if narrow:
+        gone = [t for t in threads if read_block(doc, tables["discussion"][t].get("parentId")) is None]
+        if gone:
+            return refuse("блока треда %s на странице нет — снимать тред не с чего." % ", ".join(gone))
     # Узкий откат — без возврата сегментов. Осиротевший id треда на сегменте
     # Buildin не подсвечивает (проверено живьём), поэтому их можно не трогать.
     chosen = [op for op in ops if op["path"] != ["data"]] if narrow else ops
@@ -1000,7 +1018,7 @@ def rollback_verdict(after, ops):
       not-applied — не легло ни одно изменение: откат не применился, повтор безопасен;
       ok          — все изменения на странице.
     """
-    data = (after.get("data") if isinstance(after, dict) else None) or {}
+    data = doc_data(after)
     owners = {"block": data.get("blocks") or {}, "discussion": data.get("discussions") or {}}
     landed = []
     for op in ops:
@@ -1070,7 +1088,7 @@ def run_reply(args, opts):
     doc_json, discussion_id, text, now, user_id = args
     thread = live_thread(load_doc(doc_json), discussion_id)
     print(json.dumps(build_reply_ops(thread, discussion_id, text, int(now), user_id,
-                                     mentions_from(opts))))
+                                     mentions_from(opts), opts["page"])))
 
 
 def run_reply_verdict(args, opts):
@@ -1105,7 +1123,8 @@ def run_rollback_plan(args, opts):
 
 def run_rollback_verdict(args, opts):
     after_path, ops_path = args
-    print(rollback_verdict(load_doc(after_path), load_doc(ops_path)))
+    # Операции — список, не ответ /api/docs: load_doc превратил бы их в {}.
+    print(rollback_verdict(load_doc(after_path), json.load(open(ops_path, encoding="utf-8"))))
 
 
 # Режимы билдера — одной таблицей: режим → (число позиционных после «--»,

@@ -127,6 +127,7 @@ APPLY
 #   STUB_FAIL_GET_AFTER_WRITE  — чтение после записи падает
 #   STUB_FAIL_POST             — падает сам POST
 #   STUB_INBAND_ERROR          — чтение после записи отдаёт конверт ошибки (HTTP 200, code 500)
+#   STUB_AFTER_WRITE_BODY      — чтение после записи отдаёт это тело как есть
 #   STUB_FAIL_SECOND_POST      — первый POST проходит, второй (самоочистка) падает
 #   STUB_MUTATE_ON_GET=N       — начиная с N-го чтения сегменты блока другие
 #   STUB_IGNORE_WRITES         — POST принимается, но состояние не меняется
@@ -156,6 +157,9 @@ case "\$ENDPOINT" in
         fi
         if [ -n "\${STUB_INBAND_ERROR:-}" ] && [ -s "\$LOG_DIR/tx-body.json" ]; then
             echo '{"code":500,"msg":"stub: in-band error"}'; exit 0
+        fi
+        if [ -n "\${STUB_AFTER_WRITE_BODY:-}" ] && [ -s "\$LOG_DIR/tx-body.json" ]; then
+            printf '%s' "\$STUB_AFTER_WRITE_BODY"; exit 0
         fi
         if [ -n "\${STUB_MUTATE_ON_GET:-}" ] && [ "\$N" -ge "\$STUB_MUTATE_ON_GET" ]; then
             cat "$TMP/state-changed.json"; exit 0

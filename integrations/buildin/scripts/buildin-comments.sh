@@ -218,7 +218,9 @@ write_verified() {
         echo "       $unknown" >&2
         exit 2
     fi
-    status=$(python3 "$SCRIPT_DIR/buildin-comment.py" "$mode" -- "$doc" "$@")
+    # Упавший вердикт — тоже «исход неизвестен»: POST уже ушёл, а set -e вышел
+    # бы с кодом 1 («не легло, повтор безопасен») — повтор задвоил бы запись.
+    status=$(python3 "$SCRIPT_DIR/buildin-comment.py" "$mode" -- "$doc" "$@") || status=""
     case "$status" in
         ok)
             return 0
@@ -439,14 +441,12 @@ if segs(sys.argv[1]) != segs(sys.argv[2]):
         OPS_DIR=$(mktemp -d)
         DISCUSSION=$(echo "$BUILT" | python3 -c "
 import json, os, sys
-out, page, block = sys.argv[1:4]
+out = sys.argv[1]
 built = json.load(sys.stdin)
-for key in ('ops', 'rollback', 'rollback_records'):
+for key in ('ops', 'rollback', 'rollback_records', 'check'):
     open(os.path.join(out, key + '.json'), 'w').write(json.dumps(built[key]))
-open(os.path.join(out, 'check.json'), 'w').write(json.dumps(
-    {'page': page, 'block': block, 'segments': built['segments_after']}))
 print(built['discussion'])
-" "$OPS_DIR" "$PAGE_ID" "$BLOCK_ID")
+" "$OPS_DIR")
         write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json" "$OPS_DIR/check.json"
 
         # О созданном треде сообщаем ДО записи: id известен сразу после билдера,
@@ -472,19 +472,16 @@ print(built['discussion'])
             exit 2
         fi
 
+        # Упавший вердикт — «исход неизвестен», как у write_verified: POST уже ушёл.
         VERDICT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --verdict -- \
-            "$DOC_FILE" "$FRESH_FILE" "$BLOCK_ID" "$DISCUSSION")
+            "$DOC_FILE" "$FRESH_FILE" "$BLOCK_ID" "$DISCUSSION") || VERDICT=""
         STATUS=$(echo "$VERDICT" | sed -n 1p)
         LOST=$(echo "$VERDICT" | sed -n 2p)
 
+        # Успех — только явный ok: пустой статус упавшего вердикта иначе прошёл
+        # бы мимо всех веток и стал бы успехом.
         case "$STATUS" in
-            unverified)
-                # Блока нет в ответе: конверт ошибки, чужая страница, обрезанное
-                # тело. Об исходе записи ничего не известно, поэтому ничего не
-                # гасим — самоочистка тут снимала бы, возможно, успешный тред.
-                echo "Error: проверочное чтение не вернуло блок — исход записи неизвестен." >&2
-                echo "       Тред: $DISCUSSION. Не повторяйте команду вслепую — посмотрите блок на странице." >&2
-                exit 2
+            ok)
                 ;;
             not-applied)
                 # Нашего треда нет даже в списке блока. listAfter аддитивен, и
@@ -510,6 +507,15 @@ print(built['discussion'])
                 fi
                 echo "       Снять тред не удалось: $DISCUSSION остался в списке блока без подсветки." >&2
                 echo "       Снимите его вручную или повторите команду и уберите лишний тред." >&2
+                exit 2
+                ;;
+            *)
+                # unverified (блока нет в ответе: конверт ошибки, чужая страница,
+                # обрезанное тело) или вердикт не дал статуса. Об исходе записи
+                # ничего не известно, поэтому ничего не гасим — самоочистка тут
+                # снимала бы, возможно, успешный тред.
+                echo "Error: проверочное чтение не вернуло блок — исход записи неизвестен." >&2
+                echo "       Тред: $DISCUSSION. Не повторяйте команду вслепую — посмотрите блок на странице." >&2
                 exit 2
                 ;;
         esac
@@ -568,8 +574,8 @@ print(built['discussion'])
         mention_args "$DOC_FILE" "$DISCUSSION"
 
         # «--» обязателен: текст с ведущими дефисами билдер иначе принял бы за флаг.
-        BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply ${MENTION_ARGS[@]+"${MENTION_ARGS[@]}"} -- \
-            "$DOC_FILE" "$DISCUSSION" "$TEXT" "$NOW" "$USER_ID")
+        BUILT=$(python3 "$SCRIPT_DIR/buildin-comment.py" --reply ${MENTION_ARGS[@]+"${MENTION_ARGS[@]}"} \
+            --page="$PAGE_ID" -- "$DOC_FILE" "$DISCUSSION" "$TEXT" "$NOW" "$USER_ID")
 
         if [[ -n "$DRY_RUN" ]]; then
             # Превью не пишет и файл отката: он затёр бы откат предыдущей
@@ -583,13 +589,11 @@ print(built['discussion'])
 import json, os, sys
 out = sys.argv[1]
 built = json.load(sys.stdin)
-for key in ('ops', 'rollback'):
+for key in ('ops', 'rollback', 'check'):
     open(os.path.join(out, key + '.json'), 'w').write(json.dumps(built[key]))
 open(os.path.join(out, 'space'), 'w').write(built['space'])
-# Сверка — страница: по ней comment-rollback проверит, что гасит именно ваш ответ.
-open(os.path.join(out, 'check.json'), 'w').write(json.dumps({'page': sys.argv[2]}))
 print(built['comment'])
-" "$OPS_DIR" "$PAGE_ID")
+" "$OPS_DIR")
         SPACE_ID=$(cat "$OPS_DIR/space")
         write_rollback "$SPACE_ID" "$OPS_DIR/rollback.json" "$OPS_DIR/check.json"
 

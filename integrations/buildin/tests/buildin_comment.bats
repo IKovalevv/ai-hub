@@ -719,7 +719,10 @@ resolve_verdict() { python3 "$OPS_PY" --resolve-verdict="$2" -- "$1" "$THREAD"; 
 
 # ---- ответ в тред -----------------------------------------------------------
 
-reply() { python3 "$OPS_PY" --reply -- "$DOC" "$THREAD" "$1" "$NOW" "$USER" 2>/dev/null; }
+reply() { # $1=text [flags...]
+    local text="$1"; shift
+    python3 "$OPS_PY" --reply "$@" -- "$DOC" "$THREAD" "$text" "$NOW" "$USER" 2>/dev/null
+}
 reply_stderr() { python3 "$OPS_PY" --reply -- "$DOC" "$THREAD" "$1" "$NOW" "$USER" 2>&1 >/dev/null; }
 
 @test "reply is a comment record plus a list op on the thread, exactly as the UI sends it" {
@@ -809,7 +812,7 @@ check_rb() { python3 "$OPS_PY" --check-rollback -- "$BATS_TEST_TMPDIR/rb.json"; 
     mkdoc '[{"text": "alpha beta", "type": 0, "enhancer": {}}]'
     built=$(build "beta" "note")
     ops=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['rollback']))")
-    after=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['segments_after']))")
+    after=$(echo "$built" | python3 -c "import json, sys; print(json.dumps(json.load(sys.stdin)['check']['segments']))")
     mkrollback "$ops" "{\"page\": \"55555555-5555-4555-8555-555555555555\", \"block\": \"$BLOCK\", \"segments\": $after}"
     [ "$(check_rb | python3 -c "import json, sys; r = json.load(sys.stdin); print(r['space'], json.dumps(r['ops']))")" = "$SPACE $ops" ]
     mkthread false
@@ -908,10 +911,24 @@ PY
     [ "$status" -eq 0 ]
 }
 
-@test "build reports the segments it writes, for the rollback freshness check" {
+@test "build hands over the rollback check: page, block and the segments it writes" {
     mkdoc '[{"text": "alpha beta gamma", "type": 0, "enhancer": {}}]'
-    result=$(build "beta" "note" | probe "print(r['segments_after'] == seg_op['args']['segments'])")
-    [ "$result" = "True" ]
+    result=$(build "beta" "note" "--page=55555555-5555-4555-8555-555555555555" | python3 -c "
+import json, sys
+r = json.load(sys.stdin)
+c = r['check']
+seg_op = [o for o in r['ops'] if o.get('path') == ['data']][0]
+print(sorted(c) == ['block', 'page', 'segments'], c['page'] == '55555555-5555-4555-8555-555555555555',
+      c['block'] == '$BLOCK', c['segments'] == seg_op['args']['segments'])")
+    [ "$result" = "True True True True" ]
+}
+
+@test "reply hands over the rollback check with the page only" {
+    mkthread false
+    result=$(reply "ответ" "--page=55555555-5555-4555-8555-555555555555" | python3 -c "
+import json, sys
+print(json.load(sys.stdin)['check'])")
+    [ "$result" = "{'page': '55555555-5555-4555-8555-555555555555'}" ]
 }
 
 # План отката: файл, текущая страница и пользователь → применить или отказать.
@@ -959,6 +976,8 @@ cases = {
     ("stale -> refuse, hint narrow", body(comment_ops, full_check), doc(segments=snap), [], False, 0, "--narrow"),
     ("stale, narrow -> ok without segments", body(comment_ops, full_check), doc(segments=snap), ["--narrow"], True, 4, ""),
     ("block missing -> refuse", body(comment_ops, full_check), doc(with_block=False), [], False, 0, "--narrow"),
+    ("block missing, narrow -> refuse before the write", body(comment_ops, full_check), doc(with_block=False),
+     ["--narrow"], False, 0, "", "блока треда"),
     ("live foreign reply -> refuse", body(comment_ops, full_check),
      doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), [], False, 0, "comment-resolve",
      "чужие сообщения"),

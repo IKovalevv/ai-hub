@@ -381,6 +381,45 @@ else
     fail "откат в обратном порядке (rc=$RC3/$RC4): $ST $(stderr | head -2)"
 fi
 
+# Проверка после записи упала — запись уже ушла, поэтому код 2, а не 1:
+# код 1 («не легло, повтор безопасен») при повторе задвоил бы ответ и тред.
+# Два тела: не объект ([]) и объект, на котором разбор страницы падает.
+for BODY in '[]' '{"code":200,"data":["x"]}'; do
+    write_thread_fixture false
+    RC=$(STUB_AFTER_WRITE_BODY="$BODY" run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+    RC2=$(STUB_AFTER_WRITE_BODY="$BODY" run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст')
+    RB="$TMP/rb-verdict-crash.json"
+    RC3=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+    RC4=$(STUB_AFTER_WRITE_BODY="$BODY" run_sub comment-rollback "$RB")
+    if [ "$RC" -eq 2 ] && [ "$RC2" -eq 2 ] && [ "$RC4" -eq 2 ] && [ -e "$RB" ] && ! stderr | grep -q Traceback; then
+        ok "проверка после записи упала ($BODY) — код 2 у ответа, комментария и отката"
+    else
+        fail "сбой проверки после записи ($BODY): ответ rc=$RC, комментарий rc=$RC2, откат rc=$RC4"
+    fi
+done
+
+# Упал сам вердикт, а не разбор страницы: запись уже ушла, поэтому тоже код 2.
+# Модуль подменён обёрткой, которая роняет только режимы вердикта.
+mv "$TMP/scripts/buildin-comment.py" "$TMP/scripts/buildin-comment-real.py"
+cat > "$TMP/scripts/buildin-comment.py" <<CRASH
+import os, sys
+if any(a in ("--verdict", "--reply-verdict", "--rollback-verdict") or a.startswith("--resolve-verdict")
+       for a in sys.argv[1:]):
+    sys.exit(1)
+os.execv(sys.executable, [sys.executable, "$TMP/scripts/buildin-comment-real.py"] + sys.argv[1:])
+CRASH
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+write_thread_fixture false
+RC2=$(run_sub comment-resolve "$PAGE" "$THREAD")
+RC3=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст')
+mv "$TMP/scripts/buildin-comment-real.py" "$TMP/scripts/buildin-comment.py"
+if [ "$RC" -eq 2 ] && [ "$RC2" -eq 2 ] && [ "$RC3" -eq 2 ]; then
+    ok "вердикт упал после записи — код 2 у ответа, резолва и комментария"
+else
+    fail "упавший вердикт после записи: ответ rc=$RC, резолв rc=$RC2, комментарий rc=$RC3"
+fi
+
 # Проверка после отката: в .applied файл уходит только тогда, когда откат
 # виден на странице. Иначе неприменившийся откат было бы уже не повторить.
 RB="$TMP/rb-ignored.json"
