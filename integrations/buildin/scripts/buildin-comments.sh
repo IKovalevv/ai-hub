@@ -703,11 +703,12 @@ print(built['comment'])
             exit 1
         fi
         USER_ID=$(get_user_id)
-        PLAN=$(python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-plan ${NARROW:+--narrow} --user="$USER_ID" -- \
-            "$FILE" "$RB_DIR/doc.json")
-        # Отказ плана — код 1: ничего не отправлено. Применяем только при явном
-        # apply: сбой плана не должен превращаться в откат вслепую.
-        echo "$PLAN" | python3 -c "
+        # План по странице в $RB_DIR/doc.json. Отказ — причина в stderr и код
+        # 1: ничего не отправлено. Применяем только при явном apply: сбой плана
+        # не должен превращаться в откат вслепую.
+        rollback_plan() {
+            python3 "$SCRIPT_DIR/buildin-comment.py" --rollback-plan ${NARROW:+--narrow} --user="$USER_ID" -- \
+                "$FILE" "$RB_DIR/doc.json" | python3 -c "
 import json, os, sys
 plan, out = json.load(sys.stdin), sys.argv[1]
 if plan['apply'] is not True:
@@ -717,14 +718,46 @@ if plan['apply'] is not True:
     sys.exit(1)
 open(os.path.join(out, 'space'), 'w').write(plan['space'])
 open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
+open(os.path.join(out, 'threads'), 'w').write(' '.join(plan['open_threads']))
 " "$RB_DIR"
+        }
+        rollback_plan || exit 1
         SPACE_ID=$(cat "$RB_DIR/space")
         OPS=$(cat "$RB_DIR/ops")
+        THREADS=$(cat "$RB_DIR/threads")
         if [[ -n "$DRY_RUN" ]]; then
             # Превью после всех сверок: агент видит ровно то, что уйдёт, или
             # отказ. Файл не переименовывается — откат ещё не применён.
+            [[ -z "$THREADS" ]] || echo "Перед откатом команда закроет тред $THREADS и сверит его ещё раз." >&2
             echo "$OPS" | print_ops
             exit 0
+        fi
+
+        # Шаг 1: открытый гасимый тред сначала закрывается. Закрытый /api/docs
+        # ещё отдаёт, погашенный — уже нет, поэтому только так виден ответ
+        # коллеги, пришедший в окне между сверкой и откатом: условной записи у
+        # API нет (проверено живьём). Пришёл — тред открывается обратно, откат
+        # отказывает; ничего не потеряно. Закрытый тред на странице не виден,
+        # так что после этого шага новый ответ в него маловероятен.
+        AFTER_CLOSE=""
+        for T in $THREADS; do
+            write_verified "$SPACE_ID" "[{\"id\": \"$T\", \"command\": \"update\", \"table\": \"discussion\", \"path\": [], \"args\": {\"resolved\": true}}]" \
+                "$CHECK_PAGE" "$RB_DIR/doc.json" "закрытие треда $T перед откатом" \
+                "Файл не переименован, тред $T мог остаться закрытым. Посмотрите его: buildin-pages.sh comments $CHECK_PAGE" \
+                "тред не закрылся, файл не переименован, повтор безопасен." \
+                --resolve-verdict=true "$T"
+            AFTER_CLOSE=" Тред $T сейчас закрыт: повторите откат или откройте тред — buildin-pages.sh comment-unresolve $CHECK_PAGE $T"
+        done
+        if [[ -n "$THREADS" ]] && ! rollback_plan; then
+            for T in $THREADS; do
+                write_verified "$SPACE_ID" "[{\"id\": \"$T\", \"command\": \"update\", \"table\": \"discussion\", \"path\": [], \"args\": {\"resolved\": false}}]" \
+                    "$CHECK_PAGE" "$RB_DIR/doc.json" "возврат треда $T" \
+                    "Тред $T мог остаться закрытым — откройте его: buildin-pages.sh comment-unresolve $CHECK_PAGE $T" \
+                    "тред $T остался закрытым — откройте его: buildin-pages.sh comment-unresolve $CHECK_PAGE $T" \
+                    --resolve-verdict=false "$T"
+            done
+            echo "       Тред снова открыт: в него ответили, пока шёл откат. Откат не применён." >&2
+            exit 1
         fi
 
         # Конверт собирается заново общим transaction(): в сеть уходит одна
@@ -732,8 +765,8 @@ open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
         # В .applied файл уходит только после подтверждения на странице: иначе
         # неприменившийся откат уже не повторить, а повтор тут безопасен.
         write_verified "$SPACE_ID" "$OPS" "$CHECK_PAGE" "$RB_DIR/doc.json" "откат $FILE" \
-            "Файл не переименован. Прежде чем применять снова, посмотрите блок или тред: buildin-pages.sh comments $CHECK_PAGE" \
-            "файл не переименован, повтор безопасен." \
+            "Файл не переименован. Прежде чем применять снова, посмотрите блок или тред: buildin-pages.sh comments $CHECK_PAGE.$AFTER_CLOSE" \
+            "файл не переименован, повтор безопасен.$AFTER_CLOSE" \
             --rollback-verdict "$RB_DIR/ops"
         # Итог — строкой status, а rollback: — путь к файлу там, где он лежит
         # сейчас, как у comment и comment-reply. Если переименовать не вышло,

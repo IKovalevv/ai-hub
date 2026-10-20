@@ -422,6 +422,55 @@ else
     fail "упавший вердикт после записи: ответ rc=$RC, резолв rc=$RC2, комментарий rc=$RC3"
 fi
 
+# Откат треда — в два шага: сначала тред закрывается (закрытый /api/docs ещё
+# отдаёт, погашенный — уже нет), страница перечитывается, и только потом
+# тред гасится. Ответ коллеги, пришедший в окне перед откатом, так виден:
+# тред открывается обратно, откат отказывает, ничего не потеряно.
+RB="$TMP/rb-window.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+D=$(stdout | sed -n 's/^discussion: //p')
+RC2=$(STUB_REPLY_ON_RESOLVE=99999999-0000-4000-8000-0000000000ee run_sub comment-rollback "$RB")
+ST=$(block_state)
+if [ "$RC2" -eq 1 ] && [ -e "$RB" ] && [ ! -e "$RB.applied" ] && [ "$(posts)" -eq 2 ] \
+   && stderr | grep -q 'чужие сообщения' && stderr | grep -q 'снова открыт' \
+   && python3 -c "
+import json, sys
+s = json.load(open('$TMP/state.json'))['data']
+t = s['discussions']['$D']
+assert t.get('resolved') is False and t.get('status') != -1, t
+st = json.loads(sys.argv[1])
+assert '$D' in st['listed'] and '$D' in st['lit'], st
+" "$ST" 2>/dev/null; then
+    ok "ответ коллеги в окне перед откатом — тред открыт обратно, откат не применён"
+else
+    fail "ответ в окне перед откатом (rc=$RC2, POST=$(posts)): $(stderr | tail -3) $ST"
+fi
+
+RB="$TMP/rb-two-steps.json"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+RC2=$(run_sub comment-rollback "$RB")
+FIRST_TX=$(python3 -c "
+import json, sys
+dec = json.JSONDecoder(); raw = open('$TMP/log/tx-all.json').read(); i = 0; out = []
+while i < len(raw):
+    obj, i = dec.raw_decode(raw, i)
+    out.append([(o['table'], o['command'], sorted(o['args'])) for o in obj['transactions'][0]['operations']])
+print(json.dumps(out[0]))")
+if [ "$RC2" -eq 0 ] && [ "$(posts)" -eq 2 ] && [ "$FIRST_TX" = '[["discussion", "update", ["resolved"]]]' ]; then
+    ok "откат треда: сначала закрытие треда, потом сам откат — две записи"
+else
+    fail "два шага отката треда (rc=$RC2, POST=$(posts)): первая запись $FIRST_TX"
+fi
+
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" 'ответ' "--rollback-out=$TMP/rb-reply-one-step.json")
+RC2=$(run_sub comment-rollback "$TMP/rb-reply-one-step.json")
+if [ "$RC2" -eq 0 ] && [ "$(posts)" -eq 1 ]; then
+    ok "откат ответа — одна запись: тред он не гасит, закрывать нечего"
+else
+    fail "откат ответа (rc=$RC2, POST=$(posts))"
+fi
+
 # Проверка после отката: в .applied файл уходит только тогда, когда откат
 # виден на странице. Иначе неприменившийся откат было бы уже не повторить.
 RB="$TMP/rb-ignored.json"

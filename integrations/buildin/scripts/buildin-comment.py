@@ -1001,7 +1001,12 @@ def rollback_plan(body, doc, user_id, narrow, path):
     # Узкий откат — без возврата сегментов. Осиротевший id треда на сегменте
     # Buildin не подсвечивает (проверено живьём), поэтому их можно не трогать.
     chosen = [op for op in ops if op["path"] != ["data"]] if narrow else ops
-    return {"apply": True, "reason": "", "hint": "", "space": space, "ops": chosen}
+    # Открытые гасимые треды команда сначала закрывает и сверяет заново: ответ
+    # коллеги, пришедший в окне перед откатом, иначе не увидеть — погашенный
+    # тред /api/docs не отдаёт, а закрытый отдаёт (проверено живьём).
+    open_threads = sorted(t for t in threads if not tables["discussion"][t].get("resolved"))
+    return {"apply": True, "reason": "", "hint": "", "space": space, "ops": chosen,
+            "open_threads": open_threads}
 
 
 def rollback_verdict(after, ops):

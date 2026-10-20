@@ -1043,6 +1043,44 @@ PY2
     [ "$status" -eq 0 ]
 }
 
+@test "rollback plan names the open thread to close first, but not a closed one or a reply" {
+    run python3 - "$OPS_PY" "$BATS_TEST_TMPDIR" "$BLOCK" "$SPACE" <<'PY2'
+import json, subprocess, sys
+ops_py, tmp, block, space = sys.argv[1:5]
+page, me = "55555555-5555-4555-8555-555555555555", "77777777-0000-4000-8000-000000000001"
+D, C1, C2 = "66666666-6666-4666-8666-666666666666", "88888888-8888-4888-8888-888888888881", "88888888-8888-4888-8888-888888888882"
+snap = [{"text": "alpha beta", "type": 0, "enhancer": {}}]
+after = [{"text": "alpha ", "type": 0, "enhancer": {}}, {"text": "beta", "type": 0, "enhancer": {}, "discussions": [D]}]
+retire = lambda t, r: {"id": r, "command": "update", "table": t, "path": [], "args": {"status": -1}}
+thread_ops = [{"id": block, "command": "update", "table": "block", "path": ["data"], "args": {"segments": snap}},
+              {"id": block, "command": "listRemove", "table": "block", "path": ["discussions"], "args": {"uuid": D}},
+              retire("comment", C1), retire("discussion", D)]
+reply_ops = [{"id": D, "command": "listRemove", "table": "discussion", "path": ["comments"], "args": {"uuid": C2}},
+             retire("comment", C2)]
+def doc(resolved):
+    return {"data": {"blocks": {block: {"uuid": block, "discussions": [D], "data": {"segments": after}}},
+                     "discussions": {D: {"uuid": D, "createdBy": me, "parentId": block, "resolved": resolved,
+                                         "comments": [C1, C2]}},
+                     "comments": {C1: {"uuid": C1, "createdBy": me, "parentId": D, "status": 1},
+                                  C2: {"uuid": C2, "createdBy": me, "parentId": D, "status": -1}}}}
+def plan(ops, check, d):
+    json.dump({"transactions": [{"spaceId": space, "operations": ops}], "check": check}, open(tmp + "/rb.json", "w"))
+    json.dump(d, open(tmp + "/doc.json", "w"))
+    r = subprocess.run([sys.executable, ops_py, "--rollback-plan", "--user=" + me, "--", tmp + "/rb.json", tmp + "/doc.json"],
+                       capture_output=True, text=True)
+    return json.loads(r.stdout)
+full = {"page": page, "block": block, "segments": after}
+got = [plan(thread_ops, full, doc(False))["open_threads"], plan(thread_ops, full, doc(True))["open_threads"],
+       plan(reply_ops, {"page": page}, dict(doc(False), data=dict(doc(False)["data"], comments={
+           C1: {"uuid": C1, "createdBy": me, "parentId": D, "status": 1},
+           C2: {"uuid": C2, "createdBy": me, "parentId": D, "status": 1}})))["open_threads"]]
+print(got)
+sys.exit(0 if got == [[D], [], []] else 1)
+PY2
+    echo "$output"
+    [ "$status" -eq 0 ]
+}
+
 @test "rollback plan for a reply: only your own message, and only with a check" {
     run plan_cases reply
     echo "$output"

@@ -109,6 +109,17 @@ if not os.environ.get("STUB_IGNORE_WRITES"):
             elif command == "update" and path == []:
                 messages.setdefault(op["id"], {}).update(op["args"])
 
+# Ответ коллеги в окне перед откатом: появляется в треде вместе с записью,
+# которая этот тред закрывает (resolved: true).
+reply_uuid = os.environ.get("STUB_REPLY_ON_RESOLVE")
+if reply_uuid and not os.environ.get("STUB_IGNORE_WRITES"):
+    for op in ops:
+        if op.get("table") == "discussion" and op.get("args", {}).get("resolved") is True:
+            thread = state["data"].setdefault("discussions", {}).setdefault(op["id"], {})
+            thread.setdefault("comments", []).append(reply_uuid)
+            state["data"].setdefault("comments", {})[reply_uuid] = {
+                "uuid": reply_uuid, "parentId": op["id"], "status": 1, "createdBy": "someone-else"}
+
 # Чужая запись ПОСЛЕ нашей, построенная из ДОнашего снапшота: затирает нашу
 # подсветку — так проигрывают гонку.
 after_uuid = os.environ.get("STUB_FOREIGN_AFTER_POST")
@@ -135,6 +146,7 @@ APPLY
 #   STUB_MEMBERS_ENVELOPE      — вместо списка участников конверт ошибки (HTTP 200, code 403)
 #   STUB_FAIL_DOCS             — страница не читается вовсе
 #   STUB_NO_USER               — /api/users/me отдаёт пустой uuid
+#   STUB_REPLY_ON_RESOLVE=uuid — закрытие треда приносит в него чужой ответ (окно перед откатом)
 #   STUB_FAIL_USER             — /api/users/me отдаёт конверт ошибки и код 1
 restore_stateful_stub() {
     cat > "$TMP/scripts/buildin.sh" <<STUB
