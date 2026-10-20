@@ -7,6 +7,12 @@
 # команда теста безопасна — её статус и есть статус теста. Остальные пишутся
 # как `[[ … ]] || false` или через `[ … ]`.
 #
+# Голым считается и `(( … ))`: под bash 3.2 его провал тоже не роняет тест.
+#
+# Ограничение: CI гоняет bats под bash 5 на ubuntu, а bash 3.2 проверяется
+# только локально на маке. Гейт закрывает одну причину расхождения — голые
+# `[[ ]]` и `(( ))`, — а не все: прочие отличия 3.2 от 5 CI не увидит.
+#
 # Гейт сначала проверяет сам детектор на образцах, потом — все bats-файлы
 # integrations. Любой провал → exit≠0 → CI красный.
 set -u
@@ -18,15 +24,18 @@ FAILS=0
 ok(){ printf '  ok    %s\n' "$1"; }
 fail(){ printf '  FAIL  %s\n' "$1"; FAILS=$((FAILS+1)); }
 
-# Детектор: печатает «файл:строка: текст» на каждый голый [[ ]] не последней
-# командой @test. Строки с «\» на конце склеиваются в одну команду; тела
-# heredoc (встроенный python и т.п.) пропускаются — это не bash.
+# Детектор: печатает «файл:строка: текст» на каждый голый [[ ]] или (( ))
+# не последней командой @test. Строки с «\» на конце и строки с незакрытой
+# «[[» склеиваются в одну команду; тела heredoc (встроенный python и т.п.)
+# пропускаются — это не bash.
 cat > "$TMP/detect.py" <<'PY'
 import re
 import sys
 
 TEST_START = re.compile(r'^@test\s.*\{\s*$')
-HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?")
+# «<<<» — here-string, не heredoc: принятый за heredoc, он скрыл бы строки до
+# мнимого терминатора, а при поиске конца теста — и все тесты до конца файла.
+HEREDOC = re.compile(r"(?<!<)<<(?!<)-?\s*['\"]?(\w+)['\"]?")
 
 
 def commands(body):
@@ -42,10 +51,13 @@ def commands(body):
             continue
         if start is None:
             start = lineno
-        buf += stripped[:-1] + " " if stripped.endswith("\\") else stripped
-        if stripped.endswith("\\"):
+        cont = stripped.endswith("\\")
+        buf += (stripped[:-1] if cont else stripped) + " "
+        # Без «\», но с незакрытой «[[» или «((» — та же команда: bash ждёт
+        # закрывающие скобки на следующих строках.
+        if cont or buf.count("[[") > buf.count("]]") or buf.count("((") > buf.count("))"):
             continue
-        out.append((start, buf))
+        out.append((start, buf.strip()))
         m = HEREDOC.search(buf)
         if m:
             heredoc = m.group(1)
@@ -53,12 +65,27 @@ def commands(body):
     return out
 
 
+def strip_tail(cmd):
+    """Команда без хвостового комментария и «;». «#» в кавычках и в $# — не комментарий."""
+    out, quote = [], None
+    for i, ch in enumerate(cmd):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "#" and (i == 0 or cmd[i - 1].isspace()):
+            break
+        out.append(ch)
+    return "".join(out).strip().rstrip(";").rstrip()
+
+
 def bare(cmd):
-    """Команда — сам [[ ]] (возможно с !), без «|| …» после закрывающих скобок."""
-    c = cmd.strip()
+    """Команда — сам [[ ]] или (( )) (возможно с !), без «|| …» после скобок."""
+    c = strip_tail(cmd)
     if c.startswith("! "):
         c = c[2:].lstrip()
-    return c.startswith("[[") and c.endswith("]]")
+    return (c.startswith("[[") and c.endswith("]]")) or (c.startswith("((") and c.endswith("))"))
 
 
 def scan(path):
@@ -66,9 +93,21 @@ def scan(path):
     found, i = [], 0
     while i < len(lines):
         if TEST_START.match(lines[i]):
-            body, j = [], i + 1
-            while j < len(lines) and lines[j].rstrip() != "}":
-                body.append((j + 1, lines[j]))
+            # Конец теста — «}» в нулевой колонке вне heredoc: внутри heredoc
+            # такая строка — текст, и тест не кончается.
+            body, j, heredoc = [], i + 1, None
+            while j < len(lines):
+                line = lines[j]
+                if heredoc:
+                    if line.strip() == heredoc:
+                        heredoc = None
+                elif line.rstrip() == "}":
+                    break
+                else:
+                    m = HEREDOC.search(line)
+                    if m:
+                        heredoc = m.group(1)
+                body.append((j + 1, line))
                 j += 1
             cmds = commands(body)
             for lineno, cmd in cmds[:-1]:
@@ -109,6 +148,30 @@ detect "$TMP/sample.bats" > /dev/null && ok "heredoc и комментарии �
 
 sample 'helper() {' '    [[ "$a" == b ]]' '    echo x' '}' '@test "x" {' '    [ "$c" -eq 0 ]' '}'
 detect "$TMP/sample.bats" > /dev/null && ok "вне @test гейт не смотрит" || fail "гейт сработал вне @test"
+
+sample '@test "x" {' '    [[ "$a" == b ]]  # почему' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "[[ ]] с комментарием в конце не замечен" || ok "[[ ]] с комментарием в конце замечен"
+
+sample '@test "x" {' '    [[ "$a" == b ]];' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "[[ ]]; не замечен" || ok "[[ ]]; замечен"
+
+sample '@test "x" {' '    [[ "$a" == b &&' '       "$c" == d ]]' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "[[ ]] с переносом без «\\» не замечен" || ok "[[ ]] с переносом без «\\» замечен"
+
+sample '@test "x" {' '    (( n == 2 ))' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "(( )) посреди теста не замечен" || ok "(( )) посреди теста замечен"
+
+sample '@test "x" {' '    [[ "$a" == "#x" ]] || false  # «#» в кавычках' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && ok "«#» в кавычках не режет команду" || fail "«#» в кавычках принят за комментарий"
+
+sample '@test "x" {' '    [[ "$a" == "x #y" ]]' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "«#» в кавычках обрезал голый [[ ]] — не замечен" || ok "голый [[ ]] с «#» в кавычках замечен"
+
+sample '@test "x" {' '    run python3 - <<'"'"'PY'"'"'' '}' 'PY' '    [[ "$a" == b ]]' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "«}» в heredoc оборвал тест — [[ ]] после него не замечен" || ok "«}» в heredoc не обрывает тест"
+
+sample '@test "x" {' '    run cat <<< word' '    [[ "$a" == b ]]' '    [ "$c" -eq 0 ]' '}'
+detect "$TMP/sample.bats" > /dev/null && fail "«<<<» принят за heredoc — [[ ]] после него не замечен" || ok "«<<<» — не heredoc"
 
 # ---- bats-файлы интеграций ---------------------------------------------------
 # Тот же обход, что у раннера bats в shell-tests.yml: гейт смотрит ровно на то,

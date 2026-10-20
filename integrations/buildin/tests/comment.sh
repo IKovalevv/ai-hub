@@ -355,19 +355,32 @@ open(out_path, "w", encoding="utf-8").write(
     'buildin() { echo "POST-SENT" >> "$PROBE_LOG"; }\n'
     + tx_body + "\n" + transaction + "\n"
     'case "$1" in\n'
+    '  valid) transaction sp "[]" ;;\n'
     '  plain) transaction sp "не-json" ;;\n'
     '  guard) if ! transaction sp "не-json"; then echo "if-ветка" >/dev/null; fi ;;\n'
     'esac\n')
 EXTRACT
-for mode in plain guard; do
-    : > "$TMP/log/probe-$mode.txt"
-    PROBE_LOG="$TMP/log/probe-$mode.txt" /bin/bash "$TMP/tx-probe.sh" "$mode" >/dev/null 2>&1 || true
-    if [ -s "$TMP/log/probe-$mode.txt" ]; then
-        fail "transaction ($mode): POST ушёл с пустым телом"
-    else
-        ok "transaction ($mode): сбой сборки тела не даёт отправить POST"
-    fi
-done
+# Проба собирается вырезкой из buildin-lib.sh по точному тексту. Сдвинется
+# текст — пробы не будет, и обе проверки ниже прошли бы, ничего не запустив.
+# Поэтому: проба обязана собраться, а с валидными операциями — отправить POST.
+: > "$TMP/log/probe-valid.txt"
+PROBE_LOG="$TMP/log/probe-valid.txt" /bin/bash "$TMP/tx-probe.sh" valid >/dev/null 2>&1 || true
+if [ ! -s "$TMP/tx-probe.sh" ]; then
+    fail "проба transaction() не собрана: текст buildin-lib.sh сдвинулся, проверка не запускалась"
+elif [ ! -s "$TMP/log/probe-valid.txt" ]; then
+    fail "проба transaction() не шлёт POST и с валидными операциями — она ничего не проверяет"
+else
+    ok "проба transaction() рабочая: с валидными операциями POST уходит"
+    for mode in plain guard; do
+        : > "$TMP/log/probe-$mode.txt"
+        PROBE_LOG="$TMP/log/probe-$mode.txt" /bin/bash "$TMP/tx-probe.sh" "$mode" >/dev/null 2>&1 || true
+        if [ -s "$TMP/log/probe-$mode.txt" ]; then
+            fail "transaction ($mode): POST ушёл с пустым телом"
+        else
+            ok "transaction ($mode): сбой сборки тела не даёт отправить POST"
+        fi
+    done
+fi
 
 # ---- #6 (раунд 3): временные файлы команды не остаются на диске -------------
 # Голый mktemp на macOS игнорирует TMPDIR и кладёт файлы в /var/folders/...,
@@ -406,6 +419,41 @@ if [ "$RC" -eq 0 ] && [ "$CREATED" -ge 3 ] && [ "$STRAY" -eq 0 ]; then
 else
     fail "утечка временных файлов (rc=$RC, создано=$CREATED, осталось=$STRAY)"
 fi
+
+# Та же проба на остальных командах: копии страницы и списка участников они
+# тоже кладут во временные файлы — и на успехе, и на отказе.
+leak_check() { # $1 — подпись, дальше — подкоманда с аргументами
+    local label="$1" rc created stray f
+    shift
+    : > "$PROBE_LOG"
+    rc=$(PATH="$TMP/bin:$PATH" MKTEMP_PROBE_DIR="$PROBE" MKTEMP_PROBE_LOG="$PROBE_LOG" run_sub "$@")
+    created=$(wc -l < "$PROBE_LOG" | tr -d ' ')
+    stray=0
+    while IFS= read -r f; do
+        case "$f" in *buildin-rollback-*) continue ;; esac
+        [ -e "$f" ] && { stray=$((stray + 1)); echo "      остался: $f"; }
+    done < "$PROBE_LOG"
+    if [ "$created" -ge 1 ] && [ "$stray" -eq 0 ]; then
+        ok "временные файлы удалены: $label (rc=$rc, создано $created)"
+    else
+        fail "утечка временных файлов: $label (rc=$rc, создано=$created, осталось=$stray)"
+    fi
+}
+write_thread_fixture false
+leak_check "comment-reply" comment-reply "$PAGE" "$THREAD" 'ответ'
+write_thread_fixture false
+leak_check "comment-reply --mention" comment-reply "$PAGE" "$THREAD" 'ответ' "--mention=$OTHER"
+write_thread_fixture true
+leak_check "comment-reply в закрытый тред, отказ" comment-reply "$PAGE" "$THREAD" 'ответ'
+write_thread_fixture false
+leak_check "comment-resolve" comment-resolve "$PAGE" "$THREAD"
+write_fixture
+leak_check "comment --mention" comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--mention=$OTHER"
+RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$TMP/leak-rb.json")
+leak_check "comment-rollback --dry-run" comment-rollback "$TMP/leak-rb.json" --dry-run
+leak_check "comment-rollback" comment-rollback "$TMP/leak-rb.json"
+leak_check "members" members "$PAGE"
+leak_check "comments" comments "$PAGE"
 
 CLEANDIR="$TMP/tmpdir-probe"; rm -rf "$CLEANDIR"; mkdir -p "$CLEANDIR"
 

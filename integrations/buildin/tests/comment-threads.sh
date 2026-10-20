@@ -917,4 +917,24 @@ else
     fail "вывод при неизвестной команде: stdout=$(stdout | head -1) stderr=$(stderr | head -1)"
 fi
 
+
+# ---- пользователь не определён -----------------------------------------------
+# На uuid пользователя держится авторство: ответ пишется от его имени, откат
+# сверяет по нему чьи записи. Нет uuid — отказ с кодом 1 и никакого POST.
+for KNOB in STUB_NO_USER STUB_FAIL_USER; do
+    write_thread_fixture false
+    RC=$(export "$KNOB=1"; run_sub comment-reply "$PAGE" "$THREAD" 'ответ')
+    P1=$(posts)
+    RB="$TMP/rb-no-user-$KNOB.json"
+    RC2=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+    export "$KNOB=1"
+    RC3=$(run_sub comment-rollback "$RB")
+    unset "$KNOB"
+    if [ "$RC" -eq 1 ] && [ "$P1" -eq 0 ] && [ "$RC3" -eq 1 ] && ! sent && [ -e "$RB" ]; then
+        ok "пользователь не определён ($KNOB) — ответ и откат отказывают, POST не ушёл"
+    else
+        fail "пользователь не определён ($KNOB): ответ rc=$RC POST=$P1, откат rc=$RC3 POST=$(posts)"
+    fi
+done
+
 finish

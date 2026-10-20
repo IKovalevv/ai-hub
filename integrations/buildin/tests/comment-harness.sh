@@ -134,6 +134,8 @@ APPLY
 #   STUB_FAIL_MEMBERS          — список участников пространства не отдаётся
 #   STUB_MEMBERS_ENVELOPE      — вместо списка участников конверт ошибки (HTTP 200, code 403)
 #   STUB_FAIL_DOCS             — страница не читается вовсе
+#   STUB_NO_USER               — /api/users/me отдаёт пустой uuid
+#   STUB_FAIL_USER             — /api/users/me отдаёт конверт ошибки и код 1
 restore_stateful_stub() {
     cat > "$TMP/scripts/buildin.sh" <<STUB
 #!/usr/bin/env bash
@@ -142,6 +144,8 @@ LOG_DIR="$TMP/log"
 printf '%s %s\n' "\$METHOD" "\$ENDPOINT" >> "\$LOG_DIR/calls.txt"
 case "\$ENDPOINT" in
     /api/users/me)
+        if [ -n "\${STUB_NO_USER:-}" ]; then echo '{"code":200,"data":{"uuid":""}}'; exit 0; fi
+        if [ -n "\${STUB_FAIL_USER:-}" ]; then echo '{"code":401,"msg":"stub: unauthorized"}'; exit 1; fi
         echo '{"code":200,"data":{"uuid":"user-1"}}' ;;
     /api/blocks/$MENTIONED)
         echo '{"code":200,"data":{"uuid":"$MENTIONED","spaceId":"$SPACE","title":"Страница B"}}' ;;
