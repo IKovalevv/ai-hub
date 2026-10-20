@@ -1,4 +1,10 @@
-export type BackgroundTask = { id: string; kind: string; label: string; startedAt: number }
+export type BackgroundTask = {
+  id: string
+  kind: string
+  label: string
+  startedAt: number
+  link?: { href: string; label: string }
+}
 
 declare module 'claude-code' {
   interface PluginState {

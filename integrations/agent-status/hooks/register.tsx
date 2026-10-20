@@ -23,6 +23,48 @@ const now = atom({ plugin: 'agent-status', key: 'now' } as const, 0)
 const FOLDED_ROWS = 3
 const ENDED = /<status>\s*(completed|failed|killed|stopped|timed_out|error)\s*<\/status>/i
 
+// A link to what a background command waits for, where the command names it:
+// a Databricks job run (host from ~/.databrickscfg by --profile) or a GitHub Actions run.
+type RunLink = { href: string; label: string }
+let databricksHosts: Record<string, string> | undefined
+let databricksDefault = ''
+async function loadDatabricksHosts($: EngineInterface): Promise<Record<string, string>> {
+  if (databricksHosts) return databricksHosts
+  databricksHosts = {}
+  let text = ''
+  try {
+    text = await $.fs.read(`${(await $.env.get('HOME')) ?? '.'}/.databrickscfg`)
+  } catch {}
+  let section = ''
+  for (const line of text.split('\n')) {
+    const head = /^\s*\[([^\]]+)\]/.exec(line)
+    if (head) {
+      section = head[1] ?? ''
+      continue
+    }
+    const kv = /^\s*(host|default_profile)\s*=\s*(\S+)/.exec(line)
+    if (!kv) continue
+    if (kv[1] === 'host') databricksHosts[section] = (kv[2] ?? '').replace(/\/+$/, '')
+    else databricksDefault = kv[2] ?? ''
+  }
+  return databricksHosts
+}
+
+async function linkFor($: EngineInterface, command: string): Promise<RunLink | undefined> {
+  const gh = /gh\s+run\s+(?:watch|view)\s+(\d+)[^\n]*?--repo[= ](\S+)/.exec(command)
+  if (gh) return { href: `https://github.com/${gh[2]}/actions/runs/${gh[1]}`, label: 'run ↗' }
+  if (!/databricks/.test(command)) return undefined
+  const run =
+    /jobs\s+get-run(?:-output)?\s+(\d{6,})/.exec(command) ?? /--run[-_]id[= ](\d{6,})/.exec(command)
+  if (!run) return undefined
+  const hosts = await loadDatabricksHosts($)
+  const profile = /(?:--profile|\s-p)[= ](\S+)/.exec(command)?.[1] ?? databricksDefault
+  const host = hosts[profile] ?? Object.values(hosts)[0]
+  if (!host) return undefined
+  const workspace = /adb-(\d+)/.exec(host)?.[1]
+  return { href: `${host}/jobs/runs/${run[1]}${workspace ? `?o=${workspace}` : ''}`, label: 'ноутбук ↗' }
+}
+
 function elapsed(ms: number): string {
   const min = Math.floor(ms / 60000)
   if (min < 1) return '<1 мин'
@@ -276,11 +318,13 @@ export const register: Register = (on, config) => {
             ? out.agentId
             : undefined
     if (id) {
+      const link = await linkFor($, input.command ?? '').catch(() => undefined)
       const task: BackgroundTask = {
         id,
         kind: input.tool,
         label: input.description ?? (input.command ?? '').slice(0, 80),
         startedAt: await $.clock.now(),
+        ...(link ? { link } : {}),
       }
       await update($, tasks, list => [...list.filter(t => t.id !== id), task])
       await update($, now, () => task.startedAt)
@@ -332,20 +376,23 @@ export const register: Register = (on, config) => {
     const isDone = (await read($, shown)) === 'done'
     if (e.props.hasSurvey || (list.length === 0 && !isDone)) return next(e)
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
     const at = await read($, now)
     const open = await read($, isExpanded)
     const visible = open ? list : list.slice(0, FOLDED_ROWS)
-    const width = Math.max(20, (e.props.bodyColumns ?? 80) - 20)
+    const width = Math.max(20, (e.props.bodyColumns ?? 80) - 32)
     return (
       <Box flexDirection="column">
         {list.length > 0 && <Text bold>⏳ Фоновые задачи · {list.length}</Text>}
         {visible.map(t => (
-          <Text key={t.id}>
-            <Text dimColor>{t.kind.padEnd(8)}</Text>
-            {t.label.length > width ? t.label.slice(0, width - 1) + '…' : t.label}
-            <Text dimColor>  {elapsed(Math.max(0, at - t.startedAt))}</Text>
-          </Text>
+          <Box key={t.id}>
+            <Text>
+              <Text dimColor>{t.kind.padEnd(8)}</Text>
+              {t.label.length > width ? t.label.slice(0, width - 1) + '…' : t.label}
+              <Text dimColor>  {elapsed(Math.max(0, at - t.startedAt))}  </Text>
+            </Text>
+            {t.link && <Link href={t.link.href} label={t.link.label} />}
+          </Box>
         ))}
         {list.length > FOLDED_ROWS && (
           <Button
