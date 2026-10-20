@@ -36,7 +36,8 @@
 #                                                  файл становится <file>.applied, повтор — отказ;
 #                                                  блок меняли после комментария — полный откат
 #                                                  отвергается, --narrow снимает только свой тред;
-#                                                  в треде чужой ответ или записи не ваши — отказ
+#                                                  в треде чужой ответ или записи не ваши — отказ;
+#                                                  ваши ответы в треде — тоже: сначала откатите их
 #   members <page_id|url>                        — участники пространства страницы: «<uuid>  <nickname>»,
 #                                                  uuid — для --mention
 
@@ -68,6 +69,10 @@ read_arg_text() {
              [[ -f "$file" ]] || {
                  echo "Error: значение начинается с «@», поэтому разобрано как путь к файлу: $file" >&2
                  echo "       файл не найден. Нужен литеральный текст с «@» — удвойте сигил: @@${file}" >&2
+                 # «@имя» — естественная попытка позвать человека, а «@@имя» даст
+                 # обычный текст без уведомления: агент решил бы, что позвал.
+                 echo "       Чтобы позвать человека, нужен --mention=<uuid>; uuid даёт buildin-pages.sh members <страница>." >&2
+                 echo "       «@@имя» даст обычный текст без упоминания и уведомления." >&2
                  exit 1
              }
              cat "$file" ;;
@@ -285,6 +290,7 @@ print_commands() {
     echo "  comment-rollback <file> [--narrow] [--dry-run]"
     echo "                                           — откат comment/comment-reply по файлу из «rollback: <путь>»;"
     echo "                                             чужие ответы в треде или записи не ваши — отказ;"
+    echo "                                             ваши ответы в треде — тоже: сначала откатите их;"
     echo "                                             блок меняли — полный откат отвергнут, --narrow снимает тред"
     echo "  members <id|url>                         — участники пространства: «<uuid>  <nickname>» для --mention"
     echo "                                             (упоминание — только людей и только в начале текста)"
@@ -667,6 +673,7 @@ print(built['comment'])
             который изменился после комментария (полный откат тогда отвергается)
   --dry-run: сверить файл со страницей и показать операции, ничего не записывая
   в треде есть чужие ответы или записи из файла не ваши — отказ: откат погасил бы чужое
+  в треде ваши ответы — тоже отказ: сначала откатите их своими файлами из comment-reply
   после применения файл переименовывается в <file>.applied — повтор отвергается'
         parse_comment_flags "narrow dry-run" "$@"
         FILE="${ARGS[0]:-}"
@@ -728,11 +735,17 @@ open(os.path.join(out, 'ops'), 'w').write(json.dumps(plan['ops']))
             "Файл не переименован. Прежде чем применять снова, посмотрите блок или тред: buildin-pages.sh comments $CHECK_PAGE" \
             "файл не переименован, повтор безопасен." \
             --rollback-verdict "$RB_DIR/ops"
-        if ! mv "$FILE" "$FILE.applied"; then
+        # Итог — строкой status, а rollback: — путь к файлу там, где он лежит
+        # сейчас, как у comment и comment-reply. Если переименовать не вышло,
+        # путь прежний: .applied, которого нет, сбил бы агента.
+        echo "status: applied"
+        if mv "$FILE" "$FILE.applied"; then
+            echo "rollback: $FILE.applied"
+        else
             echo "ВНИМАНИЕ: откат применён, но переименовать $FILE не удалось." >&2
             echo "          Повторно его не применяйте." >&2
+            echo "rollback: $FILE"
         fi
-        echo "rollback: applied ($FILE.applied)"
         ;;
 
     members)
@@ -763,11 +776,20 @@ for user in sorted((u for u in users if u.get('uuid')), key=lambda u: (u.get('ni
         print_commands
         ;;
 
-    help|*)
+    help)
         echo "Buildin Comments — комментарии к фразам внутри блоков (UI API)"
         echo "Принимает page_id как UUID или URL buildin.ai"
         echo ""
         echo "Commands:"
         print_commands
+        ;;
+
+    *)
+        # Опечатка вроде comment-resolv проходит диспетчер по шаблону comment-*.
+        # Справка с кодом 0 была бы неотличима от успеха, а контракт команд
+        # держится на кодах 0/1/2.
+        echo "Error: неизвестная команда: $COMMAND" >&2
+        print_commands >&2
+        exit 1
         ;;
 esac

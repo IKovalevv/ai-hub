@@ -1,6 +1,6 @@
 ---
 name: publish-page
-description: Create or update a page in Buildin.ai wiki (UI API)
+description: Create or update a page in Buildin.ai wiki (UI API); comment on a phrase, reply, resolve, mention people, roll back a comment
 argument-hint: "<parent_page_id_or_url> [page_title]"
 allowed-tools: ["Bash", "Read", "Glob", "Grep", "Write", "Edit", "Task", "AskUserQuestion"]
 ---
@@ -328,7 +328,8 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" insert-blocks-before "<page_id>" "<bloc
    `comment` (можно несколько). uuid даёт
    `bash "$BUILDIN_SCRIPTS/buildin-pages.sh" members "<page_id>"` — строки
    `<uuid>  <nickname>`; не участника пространства команда отвергает.
-   `@@j.doe` в тексте — это просто текст, а не упоминание.
+   `@j.doe` и `@@j.doe` в тексте — это просто текст, а не упоминание: уведомления
+   не будет.
 
    **Резолв треда** — закрыть обсуждение или открыть его заново. Id треда —
    строка `Тред <uuid>` в выводе `comments`:

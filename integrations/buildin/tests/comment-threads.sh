@@ -279,7 +279,9 @@ RB="$TMP/rb-apply.json"
 RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
 RC2=$(run_sub comment-rollback "$RB")
 ST=$(block_state)
-if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ ! -e "$RB" ] && [ -s "$RB.applied" ] && stdout | grep -q 'rollback: applied' \
+if [ "$RC" -eq 0 ] && [ "$RC2" -eq 0 ] && [ ! -e "$RB" ] && [ -s "$RB.applied" ] \
+   && [ "$(stdout)" = "status: applied
+rollback: $RB.applied" ] \
    && echo "$ST" | python3 -c "
 import json, sys
 st = json.load(sys.stdin)
@@ -457,7 +459,9 @@ if [ "$(id -u)" -ne 0 ]; then
     chmod 555 "$TMP/ro"
     RC2=$(run_sub comment-rollback "$RB")
     chmod 755 "$TMP/ro"
-    if [ "$RC2" -eq 0 ] && sent && stderr | grep -q 'переименовать' && stderr | grep -q 'Повторно его не применяйте'; then
+    if [ "$RC2" -eq 0 ] && sent && stderr | grep -q 'переименовать' && stderr | grep -q 'Повторно его не применяйте' \
+       && [ "$(stdout)" = "status: applied
+rollback: $RB" ]; then
         ok "откат ушёл, а файл не переименовался — громкое предупреждение"
     else
         fail "неудачное переименование файла отката (rc=$RC2): $(stderr | tail -2)"
@@ -881,6 +885,36 @@ if [ "$RC" -eq 0 ] && [ -z "$MISSING" ] && stdout | grep -q '^  members '; then
     ok "справка buildin-pages.sh называет все команды комментариев"
 else
     fail "в справке нет команд:$MISSING (rc=$RC)"
+fi
+
+
+# ---- подсказки агенту --------------------------------------------------------
+# «@имя» в тексте — естественная попытка позвать человека. Она разбирается как
+# путь к файлу, и подсказка обязана вести к --mention, а не только к «@@»:
+# «@@имя» даст обычный текст без уведомления.
+write_thread_fixture false
+RC=$(run_sub comment-reply "$PAGE" "$THREAD" '@j.doe посмотри')
+if [ "$RC" -eq 1 ] && ! sent && stderr | grep -q -- '--mention' && stderr | grep -q 'members'; then
+    ok "«@имя» в тексте — отказ с подсказкой про --mention и members"
+else
+    fail "подсказка на «@имя» (rc=$RC): $(stderr | tail -3)"
+fi
+
+# Опечатка в команде — ошибка с кодом 1, а не справка с кодом 0: по коду её не
+# отличить от успеха. help остаётся с кодом 0.
+RC=$(run_cmd comment-resolv "$PAGE" "$THREAD")
+RC2=$(run_cmd no-such-command)
+RC3=$(run_cmd help)
+if [ "$RC" -eq 1 ] && [ "$RC2" -eq 1 ] && [ "$RC3" -eq 0 ]; then
+    ok "неизвестная команда — код 1 и в buildin-comments.sh, и в buildin-pages.sh; help — 0"
+else
+    fail "неизвестная команда: comment-resolv rc=$RC, no-such-command rc=$RC2, help rc=$RC3"
+fi
+RC=$(run_cmd comment-resolv "$PAGE" "$THREAD")
+if [ -z "$(stdout)" ] && stderr | grep -q 'неизвестная команда: comment-resolv'; then
+    ok "неизвестная команда называется в stderr, stdout пуст"
+else
+    fail "вывод при неизвестной команде: stdout=$(stdout | head -1) stderr=$(stderr | head -1)"
 fi
 
 finish

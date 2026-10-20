@@ -14,7 +14,7 @@
 #   update <page_id> <title>               — обновить заголовок страницы
 #   archive <page_id>                      — архивировать страницу (status: -1)
 #   get-blocks <page_id>                   — получить блоки страницы (JSON)
-#   comments, comment, comment-reply, comment-resolve, comment-unresolve, comment-rollback
+#   comments, comment, comment-reply, comment-resolve, comment-unresolve, comment-rollback, members
 #                                                — команды комментариев: живут в buildin-comments.sh,
 #                                                  этот скрипт передаёт их туда как есть
 #   publish-md <page_id> <file.md> [--replace]          — опубликовать markdown-файл
@@ -642,6 +642,12 @@ print(json.dumps(ops))
         ;;
 
     help|*)
+        # Неизвестная команда — ошибка с кодом 1: по коду 0 её не отличить от
+        # успеха. Справка уходит в stderr, чтобы stdout ошибки был пуст.
+        if [[ "$COMMAND" != help ]]; then
+            echo "Error: неизвестная команда: $COMMAND" >&2
+            exec 1>&2
+        fi
         echo "Buildin Pages — операции со страницами и блоками (UI API)"
         echo "Принимает page_id как UUID или URL buildin.ai"
         echo ""
@@ -661,5 +667,6 @@ print(json.dumps(ops))
         echo "  append-text <id|url> <text>              — добавить текстовый параграф"
         echo "  append-image <id|url> <image_file> [caption] — загрузить картинку (png/jpg/gif/webp) и добавить image-блок"
         echo "  delete-block <block_id> [parent_id]      — удалить блок"
+        [[ "$COMMAND" == help ]] || exit 1
         ;;
 esac

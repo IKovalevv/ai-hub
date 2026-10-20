@@ -1,6 +1,6 @@
 ---
 name: read-page
-description: Read a Buildin.ai page as markdown (by URL, page_id, or search query)
+description: Read a Buildin.ai page as markdown (by URL, page_id, or search query) and its comment threads; reply to, resolve or reopen a thread
 argument-hint: "<url_or_page_id_or_search_query>"
 allowed-tools: ["Bash", "Read", "Glob", "Grep", "AskUserQuestion"]
 ---
@@ -80,6 +80,8 @@ UI API возвращает все блоки страницы за один з�
 Упоминание человека в тексте приходит как `@ник`, а если ника нет — как первые 8
 символов его uuid. Упоминание страницы приходит ссылкой `[Название](https://buildin.ai/…)`,
 а без доступа к странице — ссылкой без названия. Дата печатается как `2026-10-16 14:30`.
+Чтобы прокомментировать дату, якорь для `comment` — «‣», а не напечатанная дата: так
+она хранится в тексте блока.
 
 Если пользователь спрашивает про **комментарии** (треды обсуждений на блоках):
 
@@ -100,8 +102,9 @@ bash "$BUILDIN_SCRIPTS/buildin-pages.sh" comment-unresolve "<page_id>" "<discuss
 ```
 
 Это запись в чужой документ — только по просьбе пользователя. Текст с кавычками
-или `$` передавай файлом (`@путь`), упоминания, коды выхода и откат — в
-`/ai-hub:buildin-publish`.
+или `$` передавай файлом (`@путь`). Упоминания, коды выхода и откат описаны в
+`publish-page.md`, в пункте «Комментарий к фразе внутри блока»; сам навык
+`/ai-hub:buildin-publish` запускать для этого не нужно.
 
 ### Фаза 3: Обновить shadow-индекс
 
