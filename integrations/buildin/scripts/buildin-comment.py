@@ -804,30 +804,88 @@ def check_rollback(body):
         raise RollbackError("служебный ключ check не по формату: нужна page, а block и segments — вместе.")
     for op in ops:
         if op.get("path") == ["data"]:
-            check_segments_restore(op, check)
+            check_segments_restore(op, check, ops)
+    check_rollback_shape(ops, check)
     return space, ops, check
 
 
-def check_segments_restore(op, check):
+def retired_records(ops):
+    """(таблица, id) записей, которые файл гасит (status -1)."""
+    return {(op["table"], op["id"]) for op in ops
+            if op["command"] == "update" and op["path"] == [] and op["args"].get("status") == -1}
+
+
+def check_rollback_shape(ops, check):
+    """Операции обязаны складываться в откат своих записей — иначе RollbackError.
+
+    Закрытого списка операций мало: из разрешённых собирается и чужое. Файл из
+    одних listRemove снимал бы чужие треды и ответы, ничего своего не гася, а
+    проверка авторства смотрит именно на гасимые записи. Поэтому:
+      - без гасимой записи файл — не откат: настоящий её гасит всегда;
+      - listRemove убирает из списка только ту запись, которую файл гасит;
+      - метку правки получает только блок, с которого файл снимает тред, или
+        блок из сверки.
+    Чья запись и с того ли списка её снимают, видно только по странице —
+    это проверяет rollback_plan.
+    """
+    retired = retired_records(ops)
+    if not retired:
+        raise RollbackError("в файле нет гасимых записей: откат comment и comment-reply "
+                            "всегда гасит свою запись.")
+    blocks = {(check or {}).get("block")}
+    for op in ops:
+        if op["command"] != "listRemove":
+            continue
+        item = ("discussion" if op["table"] == "block" else "comment", op["args"]["uuid"])
+        if item not in retired:
+            raise RollbackError("listRemove убирает из списка %s, а файл эту запись не гасит." % item[1])
+        if op["table"] == "block":
+            blocks.add(op["id"])
+    for op in ops:
+        if op["table"] == "block" and op["command"] == "update" and op["path"] == [] \
+                and op["id"] not in blocks:
+            raise RollbackError("метку правки файл ставит блоку %s, с которого ничего не снимает." % op["id"])
+
+
+def is_inverse_split(restored, after, discussion_id):
+    """after — ровно разрез restored под тред discussion_id, как его делает comment.
+
+    Разрез повторяется на возвращаемых сегментах и сравнивается со сверкой
+    целиком, со всеми полями: сверка текста пропустила бы подменённую ссылку и
+    снятую чужую подсветку."""
+    marked = [i for i, seg in enumerate(after) if discussion_id in (seg.get("discussions") or [])]
+    if len(marked) != 1:
+        return False
+    anchor = after[marked[0]].get("text", "")
+    hit = _locate(restored, len(segment_text(after[:marked[0]])), len(anchor))
+    return hit is not None and split_segments(restored, hit[0], hit[1], anchor, discussion_id) == after
+
+
+def check_segments_restore(op, check, ops):
     """Возврат сегментов допустим только тот, что пишет comment, — иначе RollbackError.
 
     Операция над сегментами — запись произвольного содержимого в блок, и одна
     её форма в файле ничего не гарантирует. Настоящий откат возвращает тот
-    блок, по которому сверка, и меняет в нём только разметку: разрез якоря
-    текст не трогает. Поэтому без сверки возврат не применяется вовсе, а со
-    сверкой — только тому же блоку и только с тем же видимым текстом.
+    блок, по которому сверка, вместе с гашением своего треда и ровно в том
+    виде, из которого comment вырезал якорь. Поэтому без сверки возврат не
+    применяется вовсе, а со сверкой — только если повторный разрез даёт сверку.
     """
     if check is None or "block" not in check:
+        # Обходного пути отказ не подсказывает: отправленный вручную файл
+        # миновал бы все проверки отката.
         raise RollbackError(
-            "возврат сегментов без сверки (ключ check) не применяется: сверить блок и "
-            "текст не с чем. Файл записан до появления сверки — посмотрите блок и при "
-            "необходимости примените откат вручную через buildin.sh.")
+            "возврат сегментов без сверки (ключ check) не применяется: сверить блок не с "
+            "чем, файл записан до появления сверки. Откат не применён; вручную его не "
+            "отправляйте — разметку блока можно вернуть в интерфейсе Buildin.")
     if op["id"] != check["block"]:
         raise RollbackError("сегменты возвращаются блоку %s, а сверка — по блоку %s."
                             % (op["id"], check["block"]))
-    if segment_text(op["args"]["segments"]) != segment_text(check["segments"]):
-        raise RollbackError("возврат сегментов меняет текст блока, а откат комментария "
-                            "возвращает только разметку.")
+    threads = [rid for table, rid in retired_records(ops) if table == "discussion"]
+    if len(threads) != 1:
+        raise RollbackError("возврат сегментов допустим только вместе с гашением одного своего треда.")
+    if not is_inverse_split(op["args"]["segments"], check["segments"], threads[0]):
+        raise RollbackError("возврат сегментов не обратен разрезу comment: откат вернул бы блоку "
+                            "не ту разметку, из которой вырезали якорь.")
 
 
 def rollback_freshness(check, doc):
@@ -866,8 +924,7 @@ def rollback_plan(body, doc, user_id, narrow, path):
         return refuse("в файле нет сверки (ключ check): он записан до неё, и проверить на странице нечего.")
     data = (doc.get("data") if isinstance(doc, dict) else None) or {}
     tables = {"discussion": data.get("discussions") or {}, "comment": data.get("comments") or {}}
-    retired = [(op["table"], op["id"]) for op in ops
-               if op["command"] == "update" and op["path"] == [] and op["args"].get("status") == -1]
+    retired = sorted(retired_records(ops))
     missing = [rid for table, rid in retired if rid not in tables[table]]
     if missing:
         return refuse("записей из файла на странице нет (%s): откат уже применён или страница не та."
@@ -875,6 +932,24 @@ def rollback_plan(body, doc, user_id, narrow, path):
     foreign = [rid for table, rid in retired if tables[table][rid].get("createdBy") != user_id]
     if foreign:
         return refuse("в файле чужие записи (%s): откат гасит только созданное вами." % ", ".join(foreign))
+    # Свою запись снимают только с её списка: тред — с блока из его parentId,
+    # ответ — с треда из его parentId. Сообщение, которое файл не убирает из
+    # списка, гасится только вместе со своим тредом.
+    unlisted = set()
+    for op in ops:
+        if op["command"] != "listRemove":
+            continue
+        item_table = "discussion" if op["table"] == "block" else "comment"
+        rid = op["args"]["uuid"]
+        unlisted.add(rid)
+        if tables[item_table][rid].get("parentId") != op["id"]:
+            return refuse("запись %s не из списка %s: откат убирал бы её не оттуда." % (rid, op["id"]))
+    threads = {rid for table, rid in retired if table == "discussion"}
+    for table, rid in retired:
+        if table == "comment" and rid not in unlisted and tables["comment"][rid].get("parentId") not in threads:
+            return refuse("сообщение %s не из гасимого треда: файл гасит его, не убирая из списка." % rid)
+    if check.get("block") and any(tables["discussion"][t].get("parentId") != check["block"] for t in threads):
+        return refuse("гасимый тред висит не на блоке из сверки %s." % check["block"])
     ours = {rid for table, rid in retired if table == "comment"}
     for table, rid in retired:
         if table != "discussion":

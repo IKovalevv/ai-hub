@@ -832,6 +832,20 @@ def data_op(bid, text):
             "args": {"segments": [{"text": text, "type": 0, "enhancer": {}}]}}
 def check(bid, text):
     return {"page": page, "block": bid, "segments": [{"text": t, "type": 0, "enhancer": {}} for t in text.split("|")]}
+# Части настоящего отката comment: тред d на блоке block, сообщение c.
+c, other_d, other_c = "88888888-8888-4888-8888-888888888881", "66666666-0000-4000-8000-0000000000d2", "88888888-0000-4000-8000-0000000000c2"
+def retire(table, rid):
+    return {"id": rid, "command": "update", "table": table, "path": [], "args": {"status": -1}}
+def unlist_thread(bid, did):
+    return {"id": bid, "command": "listRemove", "table": "block", "path": ["discussions"], "args": {"uuid": did}}
+def unlist_reply(did, cid):
+    return {"id": did, "command": "listRemove", "table": "discussion", "path": ["comments"], "args": {"uuid": cid}}
+records = [unlist_thread(block, d), retire("comment", c), retire("discussion", d), ok_op]
+link = lambda url, ds=None: dict({"text": "beta", "type": 3, "url": url, "enhancer": {}}, **({"discussions": ds} if ds else {}))
+plain = {"text": "alpha ", "type": 0, "enhancer": {}}
+after_link = {"page": page, "block": block, "segments": [plain, link("https://good.example", [d])]}
+def restore(segs):
+    return {"id": block, "command": "update", "table": "block", "path": ["data"], "args": {"segments": segs}}
 cases = [
     ({"requestId": "r"}, "нет ровно одной транзакции"),
     ({"transactions": tx([ok_op])["transactions"] * 2}, "нет ровно одной транзакции"),
@@ -860,7 +874,18 @@ cases = [
     (tx([dict(ok_op, args={"title": "x"})]), "update блока меняет не только метки времени"),
     (tx([data_op(block, "alpha beta")]), "без сверки"),
     (dict(tx([data_op(d, "alpha beta")]), check=check(block, "alpha beta")), "сегменты возвращаются блоку"),
-    (dict(tx([data_op(block, "ВЗЛОМ")]), check=check(block, "alpha beta")), "меняет текст блока"),
+    # подложенные файлы второго круга ревью: из разрешённых операций собрано чужое
+    (tx([unlist_thread(block, other_d), unlist_reply(other_d, other_c)]), "нет гасимых записей"),
+    (tx(records + [unlist_reply(other_d, other_c)]), "файл эту запись не гасит"),
+    (tx([retire("comment", c), dict(ok_op, id=other_d)]), "с которого ничего не снимает"),
+    (dict(tx([restore([plain, link("https://good.example")])]), check=after_link), "вместе с гашением одного своего треда"),
+    (dict(tx([restore([plain, link("https://evil.example")])] + records), check=after_link), "не обратен разрезу"),
+    (dict(tx([data_op(block, "ВЗЛОМ")] + records), check=dict(after_link, segments=[plain, link("x", [d])])),
+     "не обратен разрезу"),
+    # чужая подсветка: в сверке на сегменте ещё тред other_d, а возврат её снимает
+    (dict(tx([restore([plain, link("https://good.example")])] + records),
+          check=dict(after_link, segments=[dict(plain, discussions=[other_d]), link("https://good.example", [d])])),
+     "не обратен разрезу"),
 ]
 bad = []
 for body, want in cases:
@@ -869,6 +894,12 @@ for body, want in cases:
     run = subprocess.run([sys.executable, ops_py, "--check-rollback", "--", path], capture_output=True, text=True)
     if run.returncode == 0 or want not in run.stderr:
         bad.append((want, run.returncode, run.stderr.strip()[:200]))
+# Отказ не подсказывает обходной путь: файл, отправленный вручную через
+# buildin.sh, миновал бы все проверки отката.
+json.dump(tx([data_op(block, "alpha beta")]), open(tmp + "/rb.json", "w"))
+run = subprocess.run([sys.executable, ops_py, "--check-rollback", "--", tmp + "/rb.json"], capture_output=True, text=True)
+if "buildin.sh" in run.stderr:
+    bad.append(("отказ советует buildin.sh", run.stderr.strip()[:200]))
 for b in bad:
     print("NOT REFUSED AS EXPECTED:", b)
 sys.exit(1 if bad else 0)
@@ -909,12 +940,15 @@ def body(ops, check):
     if check is not None:
         b["check"] = check
     return b
-def doc(segments=after, thread_by=me, comments=(C1,), extra=None, with_block=True, with_records=True):
-    msgs = {C1: {"uuid": C1, "createdBy": me, "status": 1}}
-    msgs.update(extra or {})
+OTHER_BLOCK, D2 = "22222222-0000-4000-8000-000000000b02", "66666666-0000-4000-8000-0000000000d2"
+def doc(segments=after, thread_by=me, comments=(C1,), extra=None, with_block=True, with_records=True,
+        thread_parent=block, c1_parent=D):
+    msgs = {C1: {"uuid": C1, "createdBy": me, "status": 1, "parentId": c1_parent}}
+    for cid, rec in (extra or {}).items():
+        msgs[cid] = dict({"parentId": D}, **rec)
     data = {"blocks": {block: {"uuid": block, "discussions": [D], "data": {"segments": segments}}} if with_block else {}}
     if with_records:
-        data["discussions"] = {D: {"uuid": D, "createdBy": thread_by, "comments": list(comments)}}
+        data["discussions"] = {D: {"uuid": D, "createdBy": thread_by, "parentId": thread_parent, "comments": list(comments)}}
         data["comments"] = msgs
     return {"data": data}
 full_check = {"page": page, "block": block, "segments": after}
@@ -942,6 +976,17 @@ cases = {
      doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": -1}}), [], True, 5, ""),
     ("thread by someone else -> refuse", body(comment_ops, full_check), doc(thread_by=other), [], False, 0, ""),
     ("records gone -> refuse", body(comment_ops, full_check), doc(with_records=False), [], False, 0, ""),
+    # Запись снимается только со своего списка: тред — с блока из его parentId,
+    # сообщение треда гасится только вместе с этим тредом.
+    ("thread hangs on another block -> refuse", body(comment_ops, full_check), doc(thread_parent=OTHER_BLOCK),
+     [], False, 0, "", "не из списка"),
+    ("message from another thread -> refuse", body(comment_ops, full_check), doc(c1_parent=D2),
+     [], False, 0, "", "не из гасимого треда"),
+    # Тред честно снимается со своего блока, а сегменты файл возвращает другому.
+    ("thread from one block, segments restored to another -> refuse",
+     body([comment_ops[0], dict(comment_ops[1], id=OTHER_BLOCK)] + comment_ops[2:4] + [touch("block", OTHER_BLOCK)],
+          full_check),
+     doc(thread_parent=OTHER_BLOCK), [], False, 0, "", "не на блоке из сверки"),
   ],
   "reply": [
     ("own reply -> ok", body(reply_ops, {"page": page}),
@@ -950,6 +995,9 @@ cases = {
      doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": other, "status": 1}}), [], False, 0, ""),
     ("no check -> refuse", body(reply_ops, None),
      doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": me, "status": 1}}), [], False, 0, ""),
+    ("own reply, but from another thread -> refuse", body(reply_ops, {"page": page}),
+     doc(comments=(C1, C2), extra={C2: {"uuid": C2, "createdBy": me, "status": 1, "parentId": D2}}), [], False, 0, "",
+     "не из списка"),
   ],
 }[which]
 bad = []

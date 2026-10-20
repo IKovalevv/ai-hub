@@ -517,14 +517,12 @@ fi
 
 RB="$TMP/rb-unverified.json"
 RC=$(run_comment "$PAGE" "$BLOCK" 'в минуту' 'текст' "--rollback-out=$RB")
+# Блок удалили со страницы, а тред остался: сверять полный откат не с чем.
 python3 -c "
 import json
-b = json.load(open('$RB'))
-for o in b['transactions'][0]['operations']:
-    if o['id'] == b['check']['block']:
-        o['id'] = '$OTHER'
-b['check']['block'] = '$OTHER'
-json.dump(b, open('$RB', 'w'))"
+s = json.load(open('$TMP/state.json'))
+del s['data']['blocks']['$BLOCK']
+json.dump(s, open('$TMP/state.json', 'w'))"
 RC2=$(run_sub comment-rollback "$RB")
 if [ "$RC2" -eq 1 ] && ! sent && stderr | grep -q 'нет на странице'; then
     ok "блока из файла нет на странице — полный откат не применён"
