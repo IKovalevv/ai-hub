@@ -986,4 +986,34 @@ for KNOB in STUB_NO_USER STUB_FAIL_USER; do
     fi
 done
 
+
+# ---- участники недоступны ----------------------------------------------------
+# Короткий id вместо ника бывает и у участника без ника, и когда список
+# участников не получен. Второй случай читатели называют прямо.
+NOTE='Участники пространства недоступны: вместо ников — первые 8 символов uuid.'
+write_thread_fixture false
+RC=$(STUB_FAIL_MEMBERS=1 run_sub comments "$PAGE")
+RC2=$(run_sub comments "$PAGE")
+NOTE_OK=$(stdout | grep -cF "$NOTE" || true)
+RC3=$(STUB_FAIL_MEMBERS=1 run_sub comments "$PAGE")
+if [ "$RC" -eq 0 ] && [ "$RC3" -eq 0 ] && stdout | grep -qF "$NOTE" && [ "$NOTE_OK" -eq 0 ]; then
+    ok "comments: список участников не получен — пометка в выводе, а с ним — без неё"
+else
+    fail "пометка о недоступных участниках в comments (rc=$RC/$RC3, без сбоя пометок: $NOTE_OK)"
+fi
+python3 - "$TMP/state.json" "$PAGE" "$BLOCK" "$SPACE" "$OTHER" <<'FIX'
+import json, sys
+path, page, block, space, other = sys.argv[1:6]
+seg = [{"text": "кто: ", "type": 0, "enhancer": {}}, {"text": "", "type": 7, "uuid": other, "enhancer": {}}]
+json.dump({"code": 200, "data": {"blocks": {
+    page: {"uuid": page, "spaceId": space, "type": 0, "title": "Страница", "subNodes": [block]},
+    block: {"uuid": block, "spaceId": space, "type": 1, "data": {"segments": seg}}}}}, open(path, "w"), ensure_ascii=False)
+FIX
+RC=$(STUB_FAIL_MEMBERS=1 run_sub read "$PAGE")
+if [ "$RC" -eq 0 ] && stdout | grep -qF "$NOTE"; then
+    ok "read: список участников не получен — пометка в выводе"
+else
+    fail "пометка о недоступных участниках в read (rc=$RC): $(stdout | tail -2)"
+fi
+
 finish

@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 
+MEMBERS_NOTE = "Участники пространства недоступны: вместо ников — первые 8 символов uuid."
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
@@ -28,6 +29,9 @@ class Inline:
         self.buildin_sh = buildin_sh
         self._nicknames = None
         self._pages = {}
+        # Список участников не получен: короткий id тогда не отличить от
+        # участника без ника, и читатели об этом пишут.
+        self.members_unavailable = False
 
     def _get(self, endpoint):
         """data из ответа клиента. При ошибке он печатает конверт без data или
@@ -43,6 +47,7 @@ class Inline:
         целиком уходит в контекст агента, чужие адреса там ни к чему."""
         if self._nicknames is None:
             members = self._get("/api/spaces/%s/members" % self.space_id) if self.space_id else None
+            self.members_unavailable = not isinstance(members, list)
             users = [(m or {}).get("user") or {} for m in members] if isinstance(members, list) else []
             self._nicknames = {u.get("uuid"): u.get("nickname") for u in users}
         return self._nicknames.get(uuid) or (uuid[:8] if uuid else "?")

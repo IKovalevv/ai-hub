@@ -314,6 +314,54 @@ else
     ok "сетевой сбой: причина в stderr, stdout — валидный JSON"
 fi
 
+echo "--- таймауты: у каждого запроса, переопределяются окружением ---"
+# Зависший запрос без таймаута вешал бы команду, а с ней и агента.
+ARGS_CURL="$TMP/argscurl"
+mkdir -p "$ARGS_CURL"
+cat > "$ARGS_CURL/curl" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > "$CURL_ARGS_LOG"
+if [ -n "${CURL_EXIT:-}" ]; then echo "curl: (28) Operation timed out" >&2; exit "$CURL_EXIT"; fi
+printf '{"code":200,"data":{}}\n200\n'
+STUB
+chmod +x "$ARGS_CURL/curl"
+run_args() { # переменные окружения — аргументами env
+    rm -f "$TMP/curl-args.txt"
+    env CURL_ARGS_LOG="$TMP/curl-args.txt" PATH="$ARGS_CURL:$PATH" "$@" \
+        /bin/bash "$API_ROOT/integrations/buildin/scripts/buildin.sh" GET /api/users/me \
+        > "$TMP/out.txt" 2> "$TMP/err.txt"
+}
+arg_after() { grep -A1 -x -- "$1" "$TMP/curl-args.txt" 2>/dev/null | sed -n 2p; }
+
+run_args
+if [ "$(arg_after --connect-timeout)" = "10" ] && [ "$(arg_after --max-time)" = "60" ]; then
+    ok "таймауты по умолчанию: соединение 10 с, весь запрос 60 с"
+else
+    fail "таймауты по умолчанию: --connect-timeout=$(arg_after --connect-timeout) --max-time=$(arg_after --max-time)"
+fi
+
+run_args BUILDIN_CONNECT_TIMEOUT=3 BUILDIN_MAX_TIME=5
+if [ "$(arg_after --connect-timeout)" = "3" ] && [ "$(arg_after --max-time)" = "5" ]; then
+    ok "таймауты переопределяются окружением"
+else
+    fail "таймауты из окружения: --connect-timeout=$(arg_after --connect-timeout) --max-time=$(arg_after --max-time)"
+fi
+
+run_args BUILDIN_MAX_TIME=abc; rc=$?
+if [ "$rc" -ne 0 ] && [ ! -e "$TMP/curl-args.txt" ] && grep -q 'BUILDIN_MAX_TIME' "$TMP/err.txt"; then
+    ok "мусор в таймауте — отказ до запроса с именем переменной"
+else
+    fail "мусор в таймауте (rc=$rc, запрос был: $([ -e "$TMP/curl-args.txt" ] && echo да || echo нет))"
+fi
+
+run_args CURL_EXIT=28; rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'BUILDIN_MAX_TIME' "$TMP/err.txt" \
+   && python3 -c 'import json,sys; json.load(sys.stdin)' < "$TMP/out.txt" 2>/dev/null; then
+    ok "таймаут запроса — понятная ошибка с подсказкой, stdout — валидный JSON"
+else
+    fail "таймаут запроса (rc=$rc): $(head -c 200 "$TMP/err.txt")"
+fi
+
 echo "--- buildin.sh без python3: клиент остаётся рабочим ---"
 # Без python3 проверка `code` невозможна — тело обязано пройти насквозь, как
 # раньше, а ветки по HTTP-статусу продолжают работать. Раньше это было заявлено

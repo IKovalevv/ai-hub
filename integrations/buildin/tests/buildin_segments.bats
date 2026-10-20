@@ -63,6 +63,26 @@ calls() { grep -c "$1" "$LOG" || true; }
     [ "$(render '[{"text":"","type":7,"uuid":"44444444-4444-4444-4444-444444444444"}]')" = "@44444444" ]
 }
 
+# Без списка участников короткий id не отличить от участника без ника:
+# модуль помнит, что список не получен, и читатели об этом пишут.
+members_flag() {
+    python3 - "$SCRIPTS" "$CLIENT" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from buildin_segments import Inline
+inline = Inline({}, "s1", sys.argv[2])
+before = inline.members_unavailable
+inline.name("44444444-4444-4444-4444-444444444444")
+print(before, inline.members_unavailable)
+PY
+}
+
+@test "person: the module remembers that the members list was not received" {
+    [ "$(members_flag)" = "False False" ]
+    export FAIL_MEMBERS=1
+    [ "$(members_flag)" = "False True" ]
+}
+
 @test "page: title from the response, from the API, a link without access, and no request for a non-uuid" {
     blocks='{"66666666-0000-4000-8000-000000000001":{"title":"Родитель","spaceId":"s1"}}'
     segs='[{"text":"","type":4,"uuid":"66666666-0000-4000-8000-000000000001"},{"text":"|","type":0},{"text":"","type":4,"uuid":"55555555-5555-4555-8555-555555555555"},{"text":"|","type":0},{"text":"","type":4,"uuid":"66666666-0000-4000-8000-000000000002"},{"text":"|","type":0},{"text":"","type":4,"uuid":"55555555-5555-4555-8555-555555555555"},{"text":"|","type":0},{"text":"","type":4,"uuid":"../spaces/x"}]'

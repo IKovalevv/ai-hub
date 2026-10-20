@@ -268,7 +268,7 @@ import json, sys
 
 page_id, script_dir = sys.argv[1:3]
 sys.path.insert(0, script_dir)
-from buildin_segments import Inline
+from buildin_segments import Inline, MEMBERS_NOTE
 
 data = json.load(sys.stdin).get('data', {})
 blocks = data.get('blocks', {})
@@ -396,6 +396,8 @@ def render(node_ids, indent=0):
             render(sub, indent + 1)
 
 render(page.get('subNodes', []))
+if inline.members_unavailable:
+    print(f'> {MEMBERS_NOTE}')
 " "$PAGE_ID" "$SCRIPT_DIR"
         ;;
 

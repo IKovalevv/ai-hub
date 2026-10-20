@@ -319,7 +319,7 @@ from datetime import datetime
 
 doc_file, page_id, block_id, space_id, script_dir = sys.argv[1:6]
 sys.path.insert(0, script_dir)
-from buildin_segments import Inline
+from buildin_segments import Inline, MEMBERS_NOTE
 
 data = json.load(open(doc_file)).get('data', {})
 blocks = data.get('blocks', {})
@@ -359,6 +359,8 @@ for did, disc in discussions.items():
 if not found:
     where = f'блока {block_id}' if block_id else f'страницы {page_id}'
     print(f'Комментариев у {where} нет.')
+if inline.members_unavailable:
+    print(MEMBERS_NOTE)
 " "$DOC_FILE" "$PAGE_ID" "$BLOCK_ID" "$SPACE_ID" "$SCRIPT_DIR"
         ;;
 
